@@ -10,17 +10,80 @@ import (
 	"github.com/wamdy/gits/internal/git"
 	"github.com/wamdy/gits/internal/i18n"
 	"github.com/wamdy/gits/internal/repo"
+	"golang.org/x/term"
 )
 
-const (
-	ColorReset  = "\033[0m"
-	ColorRed    = "\033[31m"
-	ColorGreen  = "\033[32m"
-	ColorYellow = "\033[33m"
-	ColorBlue   = "\033[34m"
-	ColorPurple = "\033[35m"
-	ColorCyan   = "\033[36m"
+// 颜色码改为包级变量：由 InitColorMode 按终端能力统一置 ANSI 码或空串，
+// 全部调用点（56 处）引用包级变量，模式初始化后自动生效，无需逐点改动。
+var (
+	ColorReset  string
+	ColorRed    string
+	ColorGreen  string
+	ColorYellow string
+	ColorBlue   string
+	ColorPurple string
+	ColorCyan   string
 )
+
+// ColorMode 表示颜色输出模式。
+type ColorMode int
+
+const (
+	ColorAuto   ColorMode = iota // 自动检测终端能力
+	ColorAlways                  // 强制着色
+	ColorNever                   // 强制纯文本
+)
+
+var colorMode = ColorAuto
+
+// InitColorMode 根据 --color / --no-color 选项与终端能力初始化颜色变量。
+// 必须在任何输出发生前调用一次。
+func InitColorMode(mode string, noColorFlag bool) {
+	switch {
+	case noColorFlag || mode == "never":
+		colorMode = ColorNever
+	case mode == "always":
+		colorMode = ColorAlways
+	default:
+		colorMode = ColorAuto
+	}
+	applyColorMode()
+}
+
+func applyColorMode() {
+	if shouldColor() {
+		ColorReset = "\033[0m"
+		ColorRed = "\033[31m"
+		ColorGreen = "\033[32m"
+		ColorYellow = "\033[33m"
+		ColorBlue = "\033[34m"
+		ColorPurple = "\033[35m"
+		ColorCyan = "\033[36m"
+		return
+	}
+	ColorReset, ColorRed, ColorGreen, ColorYellow = "", "", "", ""
+	ColorBlue, ColorPurple, ColorCyan = "", "", ""
+}
+
+// shouldColor 判断当前模式与终端能力下是否应输出颜色。
+func shouldColor() bool {
+	switch colorMode {
+	case ColorAlways:
+		return true
+	case ColorNever:
+		return false
+	}
+	// auto：尊重 NO_COLOR 约定
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	// 非 TTY（输出重定向到文件/管道）不输出颜色
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return false
+	}
+	return supportsVT()
+}
+
 
 func PrintRepoInfo(info repo.RepositoryInfo) {
 	fmt.Printf("\n%s%s%s\n", ColorBlue, info.Name, ColorReset)
@@ -39,7 +102,7 @@ func PrintRepositories(repos []repo.RepositoryInfo) {
 		return
 	}
 
-	fmt.Printf(i18n.T("found_repos", len(repos)) + ":\n")
+	fmt.Print(i18n.T("found_repos", len(repos)) + ":\n")
 	for _, r := range repos {
 		PrintRepoInfo(r)
 	}

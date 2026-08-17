@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wamdy/gits/internal/config"
 	"github.com/wamdy/gits/internal/i18n"
+	"github.com/wamdy/gits/internal/ui"
 )
 
 var (
@@ -15,6 +16,8 @@ var (
 	repoIDs  string
 	parallel bool
 	yesFlag  bool
+	color    string
+	noColor  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -56,6 +59,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&repoIDs, "repo", "r", "", i18n.T("execute_on_repos"))
 	rootCmd.PersistentFlags().BoolVarP(&parallel, "parallel", "p", false, i18n.T("execute_parallel"))
 	rootCmd.PersistentFlags().BoolVarP(&yesFlag, "yes", "y", false, i18n.T("skip_confirm"))
+	rootCmd.PersistentFlags().StringVar(&color, "color", "auto", i18n.T("color_desc"))
+	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, i18n.T("no_color_desc"))
 }
 
 func initI18n() {
@@ -70,13 +75,27 @@ func initI18n() {
 func Execute() {
 	initI18n()
 
+	// 在产生任何输出前解析颜色选项并初始化颜色模式
+	// （cobra 初始化后、命令执行前；--color=invalid 在此报错退出非 0）
+	if err := rootCmd.ParseFlags(os.Args[1:]); err == nil {
+		switch color {
+		case "auto", "always", "never":
+		default:
+			fmt.Fprintf(os.Stderr, "Error: invalid value for --color: %s (must be auto, always, or never)\n", color)
+			os.Exit(1)
+		}
+	}
+	ui.InitColorMode(color, noColor)
+
 	// 动态设置命令描述（语言可能在上一次运行中被修改）
 	rootCmd.Short = i18n.T("manage_multi_repos")
 	rootCmd.Long = `gits - ` + i18n.T("git_cmd_desc")
 	rootCmd.PersistentFlags().Lookup("group").Usage = i18n.T("execute_on_group")
-	rootCmd.PersistentFlags().Lookup("repo").Usage = i18n.T("execute_on_repos")
+	rootCmd.PersistentFlags().Lookup("repo").Usage = i18n.T("repo_selection_note")
 	rootCmd.PersistentFlags().Lookup("parallel").Usage = i18n.T("execute_parallel")
 	rootCmd.PersistentFlags().Lookup("yes").Usage = i18n.T("skip_confirm")
+	rootCmd.PersistentFlags().Lookup("color").Usage = i18n.T("color_desc")
+	rootCmd.PersistentFlags().Lookup("no-color").Usage = i18n.T("no_color_desc")
 
 	initConfigCmdI18n()
 

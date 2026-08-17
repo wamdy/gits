@@ -1,8 +1,7 @@
 package cmd
 
 import (
-	"fmt"
-	"strconv"
+	"errors"
 	"strings"
 	"sync"
 
@@ -13,85 +12,41 @@ import (
 	"github.com/wamdy/gits/internal/ui"
 )
 
-func parseRepoIDs(input string, maxID int) []int {
-	var result []int
-	seen := make(map[int]bool)
-	parts := strings.Split(input, ",")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if strings.Contains(part, "-") {
-			rangeParts := strings.SplitN(part, "-", 2)
-			start, err1 := strconv.Atoi(rangeParts[0])
-			end, err2 := strconv.Atoi(rangeParts[1])
-			if err1 == nil && err2 == nil && start >= 1 && end <= maxID && start <= end {
-				for i := start; i <= end; i++ {
-					if !seen[i] {
-						seen[i] = true
-						result = append(result, i)
-					}
-				}
-			}
-		} else {
-			id, err := strconv.Atoi(part)
-			if err == nil && id >= 1 && id <= maxID && !seen[id] {
-				seen[id] = true
-				result = append(result, id)
-			}
-		}
-	}
-	return result
-}
+// errNoRepositories 表示配置中尚无任何已注册仓库。
+var errNoRepositories = errors.New("no repositories registered")
 
-func runGitCommand(args []string) {
-	var repos []repo.RepositoryInfo
-
-	groupName := GetGroup()
-	repoIDStr := GetRepoIDs()
-
-	// 检查 --group 和 --repo 是否同时使用
+// selectRepos 根据 -r / -g / 默认 三种模式选择目标仓库。
+// -r 分支基于注入的 cfg 解析（可在测试中构造 config 注入）；
+// -g / 默认 分支沿用既有仓库层查询（内部自行加载配置），行为与之前一致。
+func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.RepositoryInfo, error) {
+	// --group 和 --repo 不能同时使用
 	if groupName != "" && repoIDStr != "" {
-		ui.PrintError(fmt.Errorf(i18n.T("repo_and_group_conflict")))
-		return
+		return nil, errors.New(i18n.T("repo_and_group_conflict"))
 	}
 
 	// 检查配置是否有仓库
-	cfg, err := config.Load()
-	if err != nil {
-		ui.PrintError(err)
-		return
-	}
-
 	if len(cfg.Repositories) == 0 {
-		ui.PrintNoConfigPrompt()
-		return
+		return nil, errNoRepositories
 	}
 
-	// 构建 ID -> Repository 映射
-	repoMap := make(map[int]config.Repository)
-	maxID := 0
-	for _, r := range cfg.Repositories {
-		repoMap[r.ID] = r
-		if r.ID > maxID {
-			maxID = r.ID
+	var repos []repo.RepositoryInfo
+	switch {
+	case repoIDStr != "":
+		// 按 ID / ID 区间 / 名称通配 / 名称精确 选择仓库（ResolveSelection 内部去重）
+		selected, err := repo.ResolveSelection(repoIDStr, cfg.Repositories)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	if repoIDStr != "" {
-		// 按仓库 ID 选择
-		ids := parseRepoIDs(repoIDStr, maxID)
-		for _, id := range ids {
-			if r, ok := repoMap[id]; ok {
-				repos = append(repos, repo.RepositoryInfo{
-					Path: r.Path,
-					Name: r.Name,
-				})
-			}
+		for _, r := range selected {
+			repos = append(repos, repo.RepositoryInfo{
+				Path: r.Path,
+				Name: r.Name,
+			})
 		}
-	} else if groupName != "" {
+	case groupName != "":
 		configRepos, err := repo.GetRepositoriesByGroup(groupName)
 		if err != nil {
-			ui.PrintError(err)
-			return
+			return nil, err
 		}
 		for _, r := range configRepos {
 			repos = append(repos, repo.RepositoryInfo{
@@ -99,12 +54,11 @@ func runGitCommand(args []string) {
 				Name: r.Name,
 			})
 		}
-	} else {
-		// 使用配置中的全部仓库，不再扫描目录
+	default:
+		// 使用配置中的全部仓库
 		registered, err := repo.GetRegisteredRepositories()
 		if err != nil {
-			ui.PrintError(err)
-			return
+			return nil, err
 		}
 		for _, r := range registered {
 			repos = append(repos, repo.RepositoryInfo{
@@ -113,9 +67,36 @@ func runGitCommand(args []string) {
 			})
 		}
 	}
+	return repos, nil
+}
+
+func runGitCommand(args []string) {
+	groupName := GetGroup()
+	repoIDStr := GetRepoIDs()
+
+	cfg, err := config.Load()
+	if err != nil {
+		ui.PrintError(err)
+		return
+	}
+
+	repos, err := selectRepos(repoIDStr, groupName, cfg)
+	if errors.Is(err, errNoRepositories) {
+		ui.PrintNoConfigPrompt()
+		return
+	}
+	if err != nil {
+		ui.PrintError(err)
+		return
+	}
 
 	if len(repos) == 0 {
-		ui.PrintMessage(i18n.T("no_repositories"))
+		// 含通配符 → 通配符无匹配文案；纯 ID / 名称精确 → 通用"未找到仓库"文案
+		if repoIDStr != "" && strings.ContainsAny(repoIDStr, "*?") {
+			ui.PrintMessage(i18n.T("wildcard_no_match"))
+		} else {
+			ui.PrintMessage(i18n.T("no_repositories"))
+		}
 		return
 	}
 

@@ -140,6 +140,10 @@ var dict = map[Lang]map[string]string{
 		"cmd_group_assign":      "分配仓库到分组",
 		"cmd_group_unassign":    "从分组移除仓库",
 		"cmd_group_show":        "显示分组",
+		"wildcard_no_match":     "通配符未匹配到任何仓库",
+		"color_desc":            "颜色输出模式（auto|always|never）",
+		"no_color_desc":         "禁用颜色输出（等价于 --color=never）",
+		"repo_selection_note":   "在指定仓库上执行命令（支持 ID 列表、名称通配如 repo*、或混合使用）",
 	},
 	En: {
 		"no_config_found":       "No configuration found",
@@ -265,6 +269,10 @@ var dict = map[Lang]map[string]string{
 		"cmd_group_assign":      "Assign repository to group",
 		"cmd_group_unassign":    "Unassign repository from group",
 		"cmd_group_show":        "Show groups",
+		"wildcard_no_match":     "No repositories matched by wildcard",
+		"color_desc":            "Color output mode (auto|always|never)",
+		"no_color_desc":         "Disable color output (equivalent to --color=never)",
+		"repo_selection_note":   "Execute command on specified repositories (ID list, name wildcard like repo*, or mixed)",
 	},
 }
 

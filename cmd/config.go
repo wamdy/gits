@@ -294,7 +294,7 @@ var configScanCmd = &cobra.Command{
 		}
 
 		var newRepos []repo.RepositoryInfo
-		fmt.Printf(i18n.T("found_repos", len(discovered)) + ":\n\n")
+		fmt.Print(i18n.T("found_repos", len(discovered)) + ":\n\n")
 		for i, r := range discovered {
 			status := i18n.T("new")
 			statusColor := ui.ColorReset
@@ -402,7 +402,7 @@ var configLanguageCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		lang := args[0]
 		if lang != "zh" && lang != "en" {
-			ui.PrintError(fmt.Errorf(i18n.T("invalid_language", lang)))
+			ui.PrintError(fmt.Errorf("%s", i18n.T("invalid_language", lang)))
 			return
 		}
 		cfg, err := config.Load()
