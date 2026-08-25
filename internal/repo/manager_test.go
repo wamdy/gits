@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/wamdy/gits/internal/config"
@@ -70,7 +71,7 @@ func TestResolveSelection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveSelection(tt.input, repos)
+			got, err := ResolveSelection(tt.input, repos, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("ResolveSelection(%q) expected error", tt.input)
@@ -91,6 +92,74 @@ func TestResolveSelection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResolveSelectionByBranch(t *testing.T) {
+	repos := []config.Repository{
+		{ID: 1, Path: "/a/backend", Name: "backend"},
+		{ID: 2, Path: "/b/frontend", Name: "frontend"},
+		{ID: 3, Path: "/c/web", Name: "web"},
+	}
+	branchOwners := map[string]bool{
+		"/a/backend": true,
+		"/c/web":     true,
+	}
+	checker := func(repoPath, pattern string) (bool, error) {
+		return branchOwners[repoPath], nil
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		want    []int
+		wantErr bool
+	}{
+		{"single branch", "branch:feature/X", []int{1, 3}, false},
+		{"mixed with ID", "2,branch:feature/X", []int{2, 1, 3}, false},
+		{"dedup by ID", "1,branch:feature/X", []int{1, 3}, false},
+		{"empty pattern", "branch:", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveSelection(tt.input, repos, checker)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ResolveSelection(%q) expected error", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ResolveSelection(%q) unexpected error: %v", tt.input, err)
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Errorf("ResolveSelection(%q) = %d repos, want %d", tt.input, len(got), len(tt.want))
+				return
+			}
+			for i, r := range got {
+				if r.ID != tt.want[i] {
+					t.Errorf("ResolveSelection(%q)[%d] = ID %d, want %d", tt.input, i, r.ID, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestResolveSelectionByBranchErrors(t *testing.T) {
+	repos := []config.Repository{
+		{ID: 1, Path: "/a/backend", Name: "backend"},
+	}
+	// 传 nil checker + branch: 段 → 报错
+	if _, err := ResolveSelection("branch:feature/X", repos, nil); err == nil {
+		t.Error("ResolveSelection with branch: and nil checker expected error")
+	}
+	// checker 自身报错 → 透传
+	errChecker := func(repoPath, pattern string) (bool, error) {
+		return false, fmt.Errorf("boom")
+	}
+	if _, err := ResolveSelection("branch:feature/X", repos, errChecker); err == nil {
+		t.Error("ResolveSelection with failing checker expected error")
 	}
 }
 

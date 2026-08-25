@@ -181,6 +181,27 @@ gits config remove user-svc
 gits config remove ./services/user-service
 ```
 
+### 按分支存在过滤（`branch:` 段）
+
+`-r` 支持 `branch:<pattern>` 段，选中所有"存在指定分支（本地或远程任一）"的仓库，典型用于按功能分支批量操作：
+
+```bash
+# 只对有 feature/X 分支的仓库执行合并
+gits -r branch:feature/X -- merge feature/X
+
+# 切到环境分支（uat/sit/dev）后推送
+gits -r branch:feature/X -- checkout uat
+gits -r branch:feature/X -- push origin uat
+
+# glob：所有有 feature/* 分支的仓库
+gits -r branch:feature/* -- status
+
+# 与 ID 段并集（与逗号规则一致）
+gits -r 1-3,branch:feature/X -- pull
+```
+
+说明：`branch:feature/X` 等价于仓库同时命中 `refs/heads/feature/X` 或 `refs/remotes/*/feature/X` 中任一分支；`pattern` 支持 `*` 与 `?` 通配。
+
 ---
 
 ## Review 确认功能

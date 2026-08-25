@@ -32,8 +32,8 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 	var repos []repo.RepositoryInfo
 	switch {
 	case repoIDStr != "":
-		// 按 ID / ID 区间 / 名称通配 / 名称精确 选择仓库（ResolveSelection 内部去重）
-		selected, err := repo.ResolveSelection(repoIDStr, cfg.Repositories)
+		// 按 ID / ID 区间 / 名称通配 / 名称精确 / branch: 选择仓库（ResolveSelection 内部去重）
+		selected, err := repo.ResolveSelection(repoIDStr, cfg.Repositories, repo.DefaultBranchChecker)
 		if err != nil {
 			return nil, err
 		}

@@ -1,12 +1,15 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"strconv"
 	"strings"
 
 	"github.com/wamdy/gits/internal/config"
+	"github.com/wamdy/gits/internal/git"
+	"github.com/wamdy/gits/internal/i18n"
 )
 
 func RegisterRepository(path string) error {
@@ -131,9 +134,32 @@ func FindReposByWildcard(pattern string, repos []config.Repository) []config.Rep
 	return result
 }
 
-// ResolveSelection 解析 -r 选择值（逗号分段），支持 ID / ID 区间 / 名称通配 / 名称精确混合，
-// 结果按仓库 ID 去重。0 匹配时返回空切片与 nil 错误。
-func ResolveSelection(raw string, repos []config.Repository) ([]config.Repository, error) {
+// BranchChecker 检查某仓库路径是否存在匹配 pattern 的分支。
+type BranchChecker func(repoPath string, pattern string) (bool, error)
+
+// DefaultBranchChecker 基于 git 层实现的分支存在检查（本地或远程任一）。
+func DefaultBranchChecker(repoPath string, pattern string) (bool, error) {
+	return git.BranchExists(repoPath, pattern)
+}
+
+// FindReposByBranch 遍历 repos，返回所有存在匹配 pattern 分支的仓库。
+func FindReposByBranch(pattern string, repos []config.Repository, checker BranchChecker) ([]config.Repository, error) {
+	var result []config.Repository
+	for _, r := range repos {
+		exists, err := checker(r.Path, pattern)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			result = append(result, r)
+		}
+	}
+	return result, nil
+}
+
+// ResolveSelection 解析 -r 选择值（逗号分段），支持 ID / ID 区间 / 名称通配 / 名称精确 /
+// branch: 段混合，结果按仓库 ID 去重。0 匹配时返回空切片与 nil 错误。
+func ResolveSelection(raw string, repos []config.Repository, branchChecker BranchChecker) ([]config.Repository, error) {
 	seen := map[int]bool{}
 	var result []config.Repository
 	for _, seg := range strings.Split(raw, ",") {
@@ -149,6 +175,24 @@ func ResolveSelection(raw string, repos []config.Repository) ([]config.Repositor
 			}
 			for _, id := range ids {
 				if r, ok := findByID(repos, id); ok && !seen[r.ID] {
+					seen[r.ID] = true
+					result = append(result, r)
+				}
+			}
+		case strings.HasPrefix(seg, "branch:"): // 按分支存在过滤
+			pattern := strings.TrimPrefix(seg, "branch:")
+			if pattern == "" {
+				return nil, errors.New(i18n.T("branch_filter_invalid_empty"))
+			}
+			if branchChecker == nil {
+				return nil, errors.New(i18n.T("branch_filter_no_checker"))
+			}
+			matched, err := FindReposByBranch(pattern, repos, branchChecker)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range matched {
+				if !seen[r.ID] {
 					seen[r.ID] = true
 					result = append(result, r)
 				}

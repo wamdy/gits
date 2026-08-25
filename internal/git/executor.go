@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -48,4 +49,15 @@ func GetBranchName(path string) string {
 func GetStatus(path string) string {
 	result := Execute(path, "status", "--porcelain")
 	return result.Output
+}
+
+// BranchExists 检查 repoPath 仓库是否存在匹配 pattern 的分支（本地或远程任一）。
+// pattern 支持 glob（* / ?），由 git for-each-ref 的 refname 模式实现。
+func BranchExists(repoPath string, pattern string) (bool, error) {
+	result := Execute(repoPath, "for-each-ref", "--count=1",
+		"refs/heads/"+pattern, "refs/remotes/*/"+pattern)
+	if !result.Success {
+		return false, fmt.Errorf("git for-each-ref failed in %s: %w", repoPath, result.Error)
+	}
+	return result.Output != "", nil
 }
