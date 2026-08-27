@@ -1,10 +1,13 @@
 package repo
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/wamdy/gits/internal/config"
+	"github.com/wamdy/gits/internal/git"
 )
 
 func TestFindReposByWildcard(t *testing.T) {
@@ -182,5 +185,58 @@ func TestLooksLikeIDRange(t *testing.T) {
 				t.Errorf("looksLikeIDRange(%q) = %v, want %v", tt.seg, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDisplayBranchOnRealRepo(t *testing.T) {
+	// 使用 test-repos 下真实 git 仓库：正常分支应原样返回（非空即可，不假设分支名）。
+	nonEmpty := DisplayBranch(git.GetBranchName("../../test-repos/repo1"), "../../test-repos/repo1")
+	if nonEmpty == "" {
+		t.Error("DisplayBranch(normal repo) should return a non-empty branch")
+	}
+}
+
+func TestDisplayBranchDetachedHead(t *testing.T) {
+	// 游离 HEAD（GetBranchName 返回 "HEAD"）应回退到短 commit id。
+	// 此处用纯逻辑分支验证：branch=="HEAD" 且目标仓库有 commit → 返回非空 commit id。
+	got := DisplayBranch("HEAD", "../../test-repos/repo1")
+	if got == "" {
+		t.Error("DisplayBranch('HEAD', realRepo) should fall back to a short commit id, got empty")
+	}
+	if got == "HEAD" {
+		t.Error("DisplayBranch('HEAD', realRepo) should not return literal 'HEAD'")
+	}
+}
+
+func TestDisplayBranchEdge(t *testing.T) {
+	// 空仓库/不存在路径 → GetBranchName 与 commit id 均空 → 空串，不报错。
+	if got := DisplayBranch("", "/nonexistent/path/for/test"); got != "" {
+		t.Errorf("DisplayBranch('') = %q, want empty", got)
+	}
+}
+
+func TestGetRepositoryBranches(t *testing.T) {
+	// 正常仓库 → Branch 填充为当前分支（非空）；不存在路径 → Branch 兜底空串。
+	repos := []config.Repository{
+		{ID: 1, Path: "../../test-repos/repo1", Name: "repo1"},
+		{ID: 2, Path: "/nonexistent/path/for/test", Name: "fake"},
+	}
+	got := GetRepositoryBranches(repos)
+	if got[0].Branch == "" {
+		t.Error("GetRepositoryBranches should fill a non-empty branch for a real repo")
+	}
+	if got[1].Branch != "" {
+		t.Errorf("GetRepositoryBranches(nonexistent path) Branch = %q, want empty", got[1].Branch)
+	}
+}
+
+func TestRepositoryBranchNotPersisted(t *testing.T) {
+	// Repository.Branch 带 json:"-"，Marshal 后不得出现 branch 键（AC7 不持久化）。
+	data, err := json.Marshal(config.Repository{ID: 1, Path: "/a", Name: "a", Branch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("branch")) {
+		t.Errorf("Repository.Branch must not be serialized to JSON, got %s", data)
 	}
 }

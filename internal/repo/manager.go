@@ -51,6 +51,27 @@ func GetRegisteredRepositories() ([]config.Repository, error) {
 	return config.GetAllRepositories()
 }
 
+// DisplayBranch 统一「列表展示用分支值」口径（三处列出场景共用，避免口径发散）：
+// 正常分支 → 原样返回；无分支（空仓库）或游离 HEAD（GetBranchName 得 "HEAD"）→ 取短 commit id；
+// 空仓库无任何 commit（commit id 也为空）→ 返回空串（列留白）。
+func DisplayBranch(branch, path string) string {
+	if branch == "" || branch == "HEAD" {
+		if id := git.GetCommitIDShort(path); id != "" {
+			return id
+		}
+		return ""
+	}
+	return branch
+}
+
+// GetRepositoryBranches 串行为每个仓库填充运行时 Branch 字段（供 config show / config group show 打印）。
+func GetRepositoryBranches(repos []config.Repository) []config.Repository {
+	for i := range repos {
+		repos[i].Branch = DisplayBranch(git.GetBranchName(repos[i].Path), repos[i].Path)
+	}
+	return repos
+}
+
 func GetRepositoriesByGroup(groupName string) ([]config.Repository, error) {
 	return config.GetRepositoriesByGroup(groupName)
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -14,6 +15,22 @@ import (
 
 // errNoRepositories 表示配置中尚无任何已注册仓库。
 var errNoRepositories = errors.New("no repositories registered")
+
+// repoReviewNames 生成命令执行前确认提示用的仓库名列表。
+// 每项追加当前分支/短 commit id（复用 DisplayBranch，口径与 config show / group show / scan 一致）；
+// 空仓库（无 commit，展示值为空串）则不追加后缀，仅显示仓库名。
+func repoReviewNames(repos []repo.RepositoryInfo) []string {
+	names := make([]string, len(repos))
+	for i, r := range repos {
+		branch := repo.DisplayBranch(git.GetBranchName(r.Path), r.Path)
+		if branch == "" {
+			names[i] = r.Name
+			continue
+		}
+		names[i] = fmt.Sprintf("%s (%s)", r.Name, branch)
+	}
+	return names
+}
 
 // selectRepos 根据 -r / -g / 默认 三种模式选择目标仓库。
 // -r 分支基于注入的 cfg 解析（可在测试中构造 config 注入）；
@@ -101,10 +118,7 @@ func runGitCommand(args []string) {
 	}
 
 	if !GetYes() {
-		repoNames := make([]string, len(repos))
-		for i, r := range repos {
-			repoNames[i] = r.Name
-		}
+		repoNames := repoReviewNames(repos)
 
 		if !ui.PrintReviewPrompt(repoNames, args[0], args[1:]) {
 			ui.PrintMessage(i18n.T("operation_cancelled"))

@@ -11,6 +11,7 @@ type Repository struct {
 	Path   string   `json:"path"`
 	Name   string   `json:"name"`
 	Groups []string `json:"groups"`
+	Branch string   `json:"-"` // 运行时展示用当前分支/commit，不持久化到 config.json
 }
 
 type Defaults struct {

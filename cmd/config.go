@@ -74,6 +74,7 @@ var configShowCmd = &cobra.Command{
 			ui.PrintError(err)
 			return
 		}
+		repos = repo.GetRepositoryBranches(repos)
 		ui.PrintRegisteredRepositories(repos)
 		ui.PrintConfigPath(config.GetConfigPath())
 	},
@@ -248,6 +249,7 @@ var configGroupShowCmd = &cobra.Command{
 				ui.PrintError(err)
 				return
 			}
+			allRepos = repo.GetRepositoryBranches(allRepos)
 			ui.PrintGroups(groups, allRepos)
 		} else {
 			repos, err := repo.GetRepositoriesByGroup(args[0])
@@ -255,6 +257,7 @@ var configGroupShowCmd = &cobra.Command{
 				ui.PrintError(err)
 				return
 			}
+			repos = repo.GetRepositoryBranches(repos)
 			ui.PrintGroupDetails(args[0], repos)
 		}
 	},
@@ -304,10 +307,12 @@ var configScanCmd = &cobra.Command{
 				statusColor = ui.ColorGreen
 				nameColor = ui.ColorReset
 			}
-			fmt.Printf("  %s[%d]%s %s%s%s (%s) %s[%s]%s\n",
+			fmt.Printf("  %s[%d]%s %s%s%s (%s) %s%s%s %s[%s]%s\n",
 				ui.ColorCyan, i+1, ui.ColorReset,
 				nameColor, r.Name, ui.ColorReset,
-				r.Path, statusColor, status, ui.ColorReset)
+				r.Path,
+				ui.ColorPurple, repo.DisplayBranch(r.Branch, r.Path), ui.ColorReset,
+				statusColor, status, ui.ColorReset)
 			if !registeredPaths[r.Path] {
 				newRepos = append(newRepos, r)
 			}

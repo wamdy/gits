@@ -9,6 +9,24 @@ import (
 	"github.com/wamdy/gits/internal/repo"
 )
 
+// TestRepoReviewNames 覆盖命令前确认提示名称生成：
+// 正常仓库 → "name (branch)"；不存在路径（展示值空串）→ 仅 "name"，不追加空后缀。
+func TestRepoReviewNames(t *testing.T) {
+	repos := []repo.RepositoryInfo{
+		{Path: "../test-repos/repo1", Name: "normal"},
+		{Path: "/nonexistent/path/for/test", Name: "empty"},
+	}
+	got := repoReviewNames(repos)
+	// 正常仓库：应追加非空分支后缀。
+	if !strings.Contains(got[0], "normal (") || !strings.HasSuffix(got[0], ")") {
+		t.Errorf("repoReviewNames(normal) = %q, want a 'name (branch)' form", got[0])
+	}
+	// 不存在路径（DisplayBranch 兜底空串）：仅仓库名，不追加空括号。
+	if got[1] != "empty" {
+		t.Errorf("repoReviewNames(empty display) = %q, want just 'empty'", got[1])
+	}
+}
+
 func testConfig() *config.Config {
 	return &config.Config{
 		Repositories: []config.Repository{

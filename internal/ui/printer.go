@@ -115,14 +115,23 @@ func PrintRegisteredRepositories(repos []config.Repository) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "%s%s%s\t%s%s%s\t%s%s%s\t%s%s%s\n", ColorCyan, i18n.T("id"), ColorReset, ColorCyan, i18n.T("name"), ColorReset, ColorCyan, i18n.T("path"), ColorReset, ColorCyan, i18n.T("groups"), ColorReset)
-	fmt.Fprintln(w, "--\t----\t----\t------")
+	fmt.Fprintf(w, "%s%s%s\t%s%s%s\t%s%s%s\t%s%s%s\t%s%s%s\n",
+		ColorCyan, i18n.T("id"), ColorReset,
+		ColorCyan, i18n.T("name"), ColorReset,
+		ColorCyan, i18n.T("branch"), ColorReset,
+		ColorCyan, i18n.T("path"), ColorReset,
+		ColorCyan, i18n.T("groups"), ColorReset)
+	fmt.Fprintln(w, "--\t----\t------\t----\t------")
 	for _, r := range repos {
 		groups := i18n.T("none")
 		if len(r.Groups) > 0 {
 			groups = fmt.Sprintf("%v", r.Groups)
 		}
-		fmt.Fprintf(w, "%s%d%s\t%s%s%s\t%s\t%s\n", ColorCyan, r.ID, ColorReset, ColorBlue, r.Name, ColorReset, r.Path, groups)
+		fmt.Fprintf(w, "%s%d%s\t%s%s%s\t%s%s%s\t%s\t%s\n",
+			ColorCyan, r.ID, ColorReset,
+			ColorBlue, r.Name, ColorReset,
+			ColorPurple, r.Branch, ColorReset,
+			r.Path, groups)
 	}
 	w.Flush()
 }
@@ -145,10 +154,11 @@ func PrintGroups(groups map[string][]int, allRepos []config.Repository) {
 		} else {
 			for _, id := range ids {
 				if repo, ok := repoMap[id]; ok {
-					fmt.Printf("  - %s%d%s %s%s%s (%s)\n",
+					fmt.Printf("  - %s%d%s %s%s%s (%s) %s%s%s\n",
 						ColorCyan, id, ColorReset,
 						ColorBlue, repo.Name, ColorReset,
-						repo.Path)
+						repo.Path,
+						ColorPurple, repo.Branch, ColorReset)
 				} else {
 					fmt.Printf("  - %s%d%s %s%s%s\n",
 						ColorCyan, id, ColorReset,
@@ -165,10 +175,11 @@ func PrintGroupDetails(name string, repos []config.Repository) {
 		fmt.Println("  " + i18n.T("empty"))
 	} else {
 		for _, r := range repos {
-			fmt.Printf("  - %s%d%s %s%s%s (%s)\n",
+			fmt.Printf("  - %s%d%s %s%s%s (%s) %s%s%s\n",
 				ColorCyan, r.ID, ColorReset,
 				ColorBlue, r.Name, ColorReset,
-				r.Path)
+				r.Path,
+				ColorPurple, r.Branch, ColorReset)
 		}
 	}
 }

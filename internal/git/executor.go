@@ -46,6 +46,16 @@ func GetBranchName(path string) string {
 	return ""
 }
 
+// GetCommitIDShort 返回当前 HEAD 的短 commit id（git rev-parse --short HEAD）。
+// 空仓库（无任何提交）或执行失败时返回空串；用于无分支（空/游离 HEAD）时替代分支显示。
+func GetCommitIDShort(path string) string {
+	result := Execute(path, "rev-parse", "--short", "HEAD")
+	if result.Success {
+		return result.Output
+	}
+	return ""
+}
+
 func GetStatus(path string) string {
 	result := Execute(path, "status", "--porcelain")
 	return result.Output
