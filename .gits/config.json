@@ -3,31 +3,31 @@
   "language": "zh",
   "repositories": [
     {
-      "id": 1,
-      "path": "C:\\Users\\Wamdy\\项目\\appollo\\tools\\gits\\test-repos\\repo1",
-      "name": "renamed-repo",
+      "id": 4,
+      "path": "C:\\Users\\Wamdy\\项目\\appollo\\code\\tools\\gits\\test-repos\\repo1",
+      "name": "repo1",
       "groups": []
     },
     {
-      "id": 2,
-      "path": "C:\\Users\\Wamdy\\项目\\appollo\\tools\\gits\\test-repos\\repo3",
-      "name": "repo3",
-      "groups": [
-        "backend"
-      ]
+      "id": 5,
+      "path": "C:\\Users\\Wamdy\\项目\\appollo\\code\\tools\\gits\\test-repos\\repo2",
+      "name": "repo2_2",
+      "groups": []
     },
     {
-      "id": 3,
-      "path": "C:\\Users\\Wamdy\\项目\\appollo\\tools\\gits\\test-repos\\repo2",
-      "name": "repo2",
+      "id": 6,
+      "path": "C:\\Users\\Wamdy\\项目\\appollo\\code\\tools\\gits\\test-repos\\repo3",
+      "name": "repo3_2",
+      "groups": []
+    },
+    {
+      "id": 7,
+      "path": "C:\\Users\\Wamdy\\项目\\appollo\\code\\tools\\gits",
+      "name": "gits",
       "groups": []
     }
   ],
-  "groups": {
-    "backend": [
-      2
-    ]
-  },
+  "groups": {},
   "defaults": {
     "remote": "origin",
     "branch": "main"
