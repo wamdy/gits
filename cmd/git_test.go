@@ -9,21 +9,27 @@ import (
 	"github.com/wamdy/gits/internal/repo"
 )
 
-// TestRepoReviewNames 覆盖命令前确认提示名称生成：
-// 正常仓库 → "name (branch)"；不存在路径（展示值空串）→ 仅 "name"，不追加空后缀。
-func TestRepoReviewNames(t *testing.T) {
+// TestRepoDisplayNames 覆盖仓库回显名称生成（review 提示与逐仓结果行共用）：
+// 已注册仓库 → "[ID] name (branch)"；未注册（ID=0）→ 省略 ID 前缀；
+// 不存在路径（展示值空串）→ 不追加空括号。
+func TestRepoDisplayNames(t *testing.T) {
 	repos := []repo.RepositoryInfo{
-		{Path: "../test-repos/repo1", Name: "normal"},
-		{Path: "/nonexistent/path/for/test", Name: "empty"},
+		{ID: 7, Path: "../test-repos/repo1", Name: "normal"},
+		{Path: "../test-repos/repo2", Name: "unregistered"},
+		{ID: 8, Path: "/nonexistent/path/for/test", Name: "empty"},
 	}
-	got := repoReviewNames(repos)
-	// 正常仓库：应追加非空分支后缀。
-	if !strings.Contains(got[0], "normal (") || !strings.HasSuffix(got[0], ")") {
-		t.Errorf("repoReviewNames(normal) = %q, want a 'name (branch)' form", got[0])
+	got := repoDisplayNames(repos)
+	// 正常仓库：应带 ID 前缀与非空分支后缀。
+	if !strings.HasPrefix(got[0], "[7] normal (") || !strings.HasSuffix(got[0], ")") {
+		t.Errorf("repoDisplayNames(id=7) = %q, want '[7] normal (branch)' form", got[0])
 	}
-	// 不存在路径（DisplayBranch 兜底空串）：仅仓库名，不追加空括号。
-	if got[1] != "empty" {
-		t.Errorf("repoReviewNames(empty display) = %q, want just 'empty'", got[1])
+	// ID=0（scan 待添加仓库）：不应出现空的 [0] 前缀。
+	if strings.HasPrefix(got[1], "[0]") {
+		t.Errorf("repoDisplayNames(id=0) = %q, want no '[0]' prefix", got[1])
+	}
+	// 不存在路径（DisplayBranch 兜底空串）：仅 ID + 仓库名，不追加空括号。
+	if got[2] != "[8] empty" {
+		t.Errorf("repoDisplayNames(empty display) = %q, want '[8] empty'", got[2])
 	}
 }
 
@@ -91,6 +97,23 @@ func TestSelectReposByRepoRef(t *testing.T) {
 			}
 			assertSameSet(t, got, tt.want)
 		})
+	}
+}
+
+// TestSelectReposCarriesID 验证选择结果带上配置 ID（供回显 `[ID] 名称 (分支)` 使用）。
+func TestSelectReposCarriesID(t *testing.T) {
+	got, err := selectRepos("1,3", "", testConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []int{1, 3}
+	if len(got) != len(want) {
+		t.Fatalf("got %d repos, want %d", len(got), len(want))
+	}
+	for i, r := range got {
+		if r.ID != want[i] {
+			t.Errorf("repos[%d].ID = %d, want %d", i, r.ID, want[i])
+		}
 	}
 }
 

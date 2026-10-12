@@ -86,7 +86,11 @@ func shouldColor() bool {
 
 
 func PrintRepoInfo(info repo.RepositoryInfo) {
-	fmt.Printf("\n%s%s%s\n", ColorBlue, info.Name, ColorReset)
+	if info.ID > 0 {
+		fmt.Printf("\n%s[%d]%s %s%s%s\n", ColorCyan, info.ID, ColorReset, ColorBlue, info.Name, ColorReset)
+	} else {
+		fmt.Printf("\n%s%s%s\n", ColorBlue, info.Name, ColorReset)
+	}
 	fmt.Printf("  %s: %s\n", i18n.T("path"), info.Path)
 	fmt.Printf("  %s: %s%s%s\n", i18n.T("branch"), ColorPurple, info.Branch, ColorReset)
 	if info.Status != "" {
@@ -184,14 +188,22 @@ func PrintGroupDetails(name string, repos []config.Repository) {
 	}
 }
 
-func PrintGitResult(result git.ExecutionResult) {
+// PrintGitResult 打印单个仓库的命令执行结果。
+// name 为 `[ID] 名称 (分支)` 回显标签（repo.DisplayLabel 口径），前置于仓库路径；
+// name 为空（调用方未提供标签）时仅显示路径。
+func PrintGitResult(result git.ExecutionResult, name string) {
+	label := ""
+	if name != "" {
+		label = fmt.Sprintf("%s%s%s ", ColorBlue, name, ColorReset)
+	}
 	if result.Success {
-		fmt.Printf("[%s%s%s]   %s\n", ColorGreen, i18n.T("ok"), ColorReset, result.RepoPath)
+		fmt.Printf("[%s%s%s]   %s%s\n", ColorGreen, i18n.T("ok"), ColorReset, label, result.RepoPath)
 		if result.Output != "" {
 			fmt.Printf("%s\n", result.Output)
 		}
 	} else {
-		fmt.Printf("[%s%s%s] %s: %s\n", ColorRed, i18n.T("fail"), ColorReset, result.RepoPath, i18n.T("git_cmd_failed"))
+		fmt.Printf("[%s%s%s] %s%s: %s\n", ColorRed, i18n.T("fail"), ColorReset,
+			label, result.RepoPath, i18n.T("git_cmd_failed"))
 		if result.Error != nil {
 			fmt.Printf("       %s: %s%v%s\n", i18n.T("error"), ColorRed, result.Error, ColorReset)
 		}

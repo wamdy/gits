@@ -240,3 +240,24 @@ func TestRepositoryBranchNotPersisted(t *testing.T) {
 		t.Errorf("Repository.Branch must not be serialized to JSON, got %s", data)
 	}
 }
+
+// TestDisplayLabel 覆盖仓库回显标签口径：ID>0 带 `[ID] ` 前缀，
+// 分支为空省略括号，两者皆缺时退回纯名称。
+func TestDisplayLabel(t *testing.T) {
+	cases := []struct {
+		id     int
+		name   string
+		branch string
+		want   string
+	}{
+		{3, "repo-backend", "mluat", "[3] repo-backend (mluat)"},
+		{3, "repo-backend", "", "[3] repo-backend"},
+		{0, "newrepo", "main", "newrepo (main)"},
+		{0, "newrepo", "", "newrepo"},
+	}
+	for _, c := range cases {
+		if got := DisplayLabel(c.id, c.name, c.branch); got != c.want {
+			t.Errorf("DisplayLabel(%d, %q, %q) = %q, want %q", c.id, c.name, c.branch, got, c.want)
+		}
+	}
+}

@@ -64,6 +64,20 @@ func DisplayBranch(branch, path string) string {
 	return branch
 }
 
+// DisplayLabel 统一「仓库回显」口径：`[ID] 名称 (分支)`。
+// ID <= 0（尚未注册的待添加仓库）省略 ID 前缀；分支为空（空仓库无任何 commit）省略括号。
+// 与 DisplayBranch 配套使用，保证 review 提示与逐仓结果行口径一致。
+func DisplayLabel(id int, name, branch string) string {
+	label := name
+	if id > 0 {
+		label = fmt.Sprintf("[%d] %s", id, name)
+	}
+	if branch != "" {
+		label += fmt.Sprintf(" (%s)", branch)
+	}
+	return label
+}
+
 // GetRepositoryBranches 串行为每个仓库填充运行时 Branch 字段（供 config show / config group show 打印）。
 func GetRepositoryBranches(repos []config.Repository) []config.Repository {
 	for i := range repos {

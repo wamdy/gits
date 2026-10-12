@@ -10,6 +10,7 @@ import (
 )
 
 type RepositoryInfo struct {
+	ID     int // 配置中的仓库 ID；0 表示尚未注册（如 scan 新发现的仓库）
 	Path   string
 	Name   string
 	Branch string

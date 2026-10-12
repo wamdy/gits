@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 
@@ -16,18 +15,14 @@ import (
 // errNoRepositories 表示配置中尚无任何已注册仓库。
 var errNoRepositories = errors.New("no repositories registered")
 
-// repoReviewNames 生成命令执行前确认提示用的仓库名列表。
-// 每项追加当前分支/短 commit id（复用 DisplayBranch，口径与 config show / group show / scan 一致）；
-// 空仓库（无 commit，展示值为空串）则不追加后缀，仅显示仓库名。
-func repoReviewNames(repos []repo.RepositoryInfo) []string {
+// repoDisplayNames 生成仓库回显用的名称列表（review 确认提示与逐仓结果行共用）。
+// 每项为 `[ID] 名称 (当前分支/短 commit id)`（复用 DisplayBranch + DisplayLabel，
+// 口径与 config show / group show / scan 一致）；空仓库（展示值为空串）只省略分支后缀。
+func repoDisplayNames(repos []repo.RepositoryInfo) []string {
 	names := make([]string, len(repos))
 	for i, r := range repos {
 		branch := repo.DisplayBranch(git.GetBranchName(r.Path), r.Path)
-		if branch == "" {
-			names[i] = r.Name
-			continue
-		}
-		names[i] = fmt.Sprintf("%s (%s)", r.Name, branch)
+		names[i] = repo.DisplayLabel(r.ID, r.Name, branch)
 	}
 	return names
 }
@@ -56,6 +51,7 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 		}
 		for _, r := range selected {
 			repos = append(repos, repo.RepositoryInfo{
+				ID:   r.ID,
 				Path: r.Path,
 				Name: r.Name,
 			})
@@ -67,6 +63,7 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 		}
 		for _, r := range configRepos {
 			repos = append(repos, repo.RepositoryInfo{
+				ID:   r.ID,
 				Path: r.Path,
 				Name: r.Name,
 			})
@@ -79,6 +76,7 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 		}
 		for _, r := range registered {
 			repos = append(repos, repo.RepositoryInfo{
+				ID:   r.ID,
 				Path: r.Path,
 				Name: r.Name,
 			})
@@ -117,29 +115,30 @@ func runGitCommand(args []string) {
 		return
 	}
 
-	if !GetYes() {
-		repoNames := repoReviewNames(repos)
+	// 回显用名称（含 ID 与当前分支）一次算好，review 提示与逐仓结果行共用
+	names := repoDisplayNames(repos)
 
-		if !ui.PrintReviewPrompt(repoNames, args[0], args[1:]) {
+	if !GetYes() {
+		if !ui.PrintReviewPrompt(names, args[0], args[1:]) {
 			ui.PrintMessage(i18n.T("operation_cancelled"))
 			return
 		}
 	}
 
 	if GetParallel() {
-		runGitCommandParallel(repos, args)
+		runGitCommandParallel(repos, names, args)
 	} else {
-		runGitCommandSequential(repos, args)
+		runGitCommandSequential(repos, names, args)
 	}
 }
 
-func runGitCommandSequential(repos []repo.RepositoryInfo, args []string) {
+func runGitCommandSequential(repos []repo.RepositoryInfo, names []string, args []string) {
 	successCount := 0
 	failCount := 0
 
-	for _, r := range repos {
+	for i, r := range repos {
 		result := git.Execute(r.Path, args...)
-		ui.PrintGitResult(result)
+		ui.PrintGitResult(result, names[i])
 		if result.Success {
 			successCount++
 		} else {
@@ -150,17 +149,21 @@ func runGitCommandSequential(repos []repo.RepositoryInfo, args []string) {
 	ui.PrintSummary(successCount, failCount)
 }
 
-func runGitCommandParallel(repos []repo.RepositoryInfo, args []string) {
-	var wg sync.WaitGroup
-	resultChan := make(chan git.ExecutionResult, len(repos))
+func runGitCommandParallel(repos []repo.RepositoryInfo, names []string, args []string) {
+	type repoResult struct {
+		name   string
+		result git.ExecutionResult
+	}
 
-	for _, r := range repos {
+	var wg sync.WaitGroup
+	resultChan := make(chan repoResult, len(repos))
+
+	for i, r := range repos {
 		wg.Add(1)
-		go func(repoPath string) {
+		go func(name, repoPath string) {
 			defer wg.Done()
-			result := git.Execute(repoPath, args...)
-			resultChan <- result
-		}(r.Path)
+			resultChan <- repoResult{name: name, result: git.Execute(repoPath, args...)}
+		}(names[i], r.Path)
 	}
 
 	go func() {
@@ -171,9 +174,9 @@ func runGitCommandParallel(repos []repo.RepositoryInfo, args []string) {
 	successCount := 0
 	failCount := 0
 
-	for result := range resultChan {
-		ui.PrintGitResult(result)
-		if result.Success {
+	for rr := range resultChan {
+		ui.PrintGitResult(rr.result, rr.name)
+		if rr.result.Success {
 			successCount++
 		} else {
 			failCount++

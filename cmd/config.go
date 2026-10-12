@@ -291,9 +291,9 @@ var configScanCmd = &cobra.Command{
 			return
 		}
 
-		registeredPaths := make(map[string]bool)
+		registeredIDs := make(map[string]int)
 		for _, r := range registered {
-			registeredPaths[r.Path] = true
+			registeredIDs[r.Path] = r.ID
 		}
 
 		var newRepos []repo.RepositoryInfo
@@ -302,18 +302,22 @@ var configScanCmd = &cobra.Command{
 			status := i18n.T("new")
 			statusColor := ui.ColorReset
 			nameColor := ui.ColorBlue
-			if registeredPaths[r.Path] {
+			// 已注册仓库附配置 ID（`#i+1` 是本次 scan 的待选择序号，与配置 ID 不同源，样式须区分）
+			idPrefix := ""
+			if id, ok := registeredIDs[r.Path]; ok {
 				status = i18n.T("registered")
 				statusColor = ui.ColorGreen
 				nameColor = ui.ColorReset
+				idPrefix = fmt.Sprintf("%s[%d]%s ", ui.ColorCyan, id, ui.ColorReset)
 			}
-			fmt.Printf("  %s[%d]%s %s%s%s (%s) %s%s%s %s[%s]%s\n",
-				ui.ColorCyan, i+1, ui.ColorReset,
+			fmt.Printf("  %s#%d%s %s%s%s%s (%s) %s%s%s %s[%s]%s\n",
+				ui.ColorYellow, i+1, ui.ColorReset,
+				idPrefix,
 				nameColor, r.Name, ui.ColorReset,
 				r.Path,
 				ui.ColorPurple, repo.DisplayBranch(r.Branch, r.Path), ui.ColorReset,
 				statusColor, status, ui.ColorReset)
-			if !registeredPaths[r.Path] {
+			if _, ok := registeredIDs[r.Path]; !ok {
 				newRepos = append(newRepos, r)
 			}
 		}
@@ -348,8 +352,8 @@ var configScanCmd = &cobra.Command{
 		skippedCount := 0
 		for _, idx := range selected {
 			r := discovered[idx]
-			if registeredPaths[r.Path] {
-				ui.PrintMessage("Skipped: " + r.Name + " (already registered)")
+			if id, ok := registeredIDs[r.Path]; ok {
+				ui.PrintMessage(fmt.Sprintf("Skipped: %s (already registered as ID %d)", r.Name, id))
 				skippedCount++
 				continue
 			}
