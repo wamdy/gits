@@ -84,7 +84,6 @@ func shouldColor() bool {
 	return supportsVT()
 }
 
-
 func PrintRepoInfo(info repo.RepositoryInfo) {
 	if info.ID > 0 {
 		fmt.Printf("\n%s[%d]%s %s%s%s\n", ColorCyan, info.ID, ColorReset, ColorBlue, info.Name, ColorReset)
@@ -237,6 +236,20 @@ func PrintNoConfigPrompt() {
 	fmt.Println(i18n.T("please_run_setup"))
 	fmt.Printf("  %sgits config scan [path]%s     - %s\n", ColorCyan, ColorReset, i18n.T("scan_desc"))
 	fmt.Printf("  %sgits config add <path>%s      - %s\n", ColorCyan, ColorReset, i18n.T("add_desc"))
+}
+
+// PrintConfigSettings 打印配置项与默认值（version/language/defaults），
+// 让用户不查看 raw JSON 也能知道 config.json 有哪些全局配置项。
+func PrintConfigSettings(cfg *config.Config) {
+	language := cfg.Language
+	if language == "" {
+		language = i18n.T("not_set")
+	}
+	fmt.Printf("\n%s%s%s:\n", ColorCyan, i18n.T("config_settings"), ColorReset)
+	fmt.Printf("  %s: %s\n", i18n.T("version"), cfg.Version)
+	fmt.Printf("  %s: %s\n", i18n.T("language"), language)
+	fmt.Printf("  %s: %s\n", i18n.T("default_remote"), cfg.Defaults.Remote)
+	fmt.Printf("  %s: %s\n", i18n.T("default_branch"), cfg.Defaults.Branch)
 }
 
 func PrintConfigPath(path string) {

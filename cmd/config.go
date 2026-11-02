@@ -69,13 +69,14 @@ var configShowCmd = &cobra.Command{
 			fmt.Println(string(data))
 			return
 		}
-		repos, err := repo.GetRegisteredRepositories()
+		cfg, err := config.Load()
 		if err != nil {
 			ui.PrintError(err)
 			return
 		}
-		repos = repo.GetRepositoryBranches(repos)
+		repos := repo.GetRepositoryBranches(cfg.Repositories)
 		ui.PrintRegisteredRepositories(repos)
+		ui.PrintConfigSettings(cfg)
 		ui.PrintConfigPath(config.GetConfigPath())
 	},
 }
@@ -451,6 +452,20 @@ var configValidateCmd = &cobra.Command{
 	},
 }
 
+var configNormalizeCmd = &cobra.Command{
+	Use:   "normalize",
+	Short: "Normalize repository paths",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		changed, err := config.NormalizePaths()
+		if err != nil {
+			ui.PrintError(err)
+			return
+		}
+		ui.PrintSuccess(i18n.T("config_normalized", changed))
+	},
+}
+
 func initConfigCmdI18n() {
 	configCmd.Short = i18n.T("config_cmd")
 	configCmd.Long = i18n.T("config_cmd") + ": " + i18n.T("manage_config_detail")
@@ -462,6 +477,8 @@ func initConfigCmdI18n() {
 	configScanCmd.Short = i18n.T("cmd_scan")
 	configLanguageCmd.Short = i18n.T("cmd_language")
 	configValidateCmd.Short = i18n.T("cmd_validate")
+	configNormalizeCmd.Short = i18n.T("cmd_normalize")
+	configNormalizeCmd.Long = i18n.T("cmd_normalize_long")
 	configGroupCmd.Short = i18n.T("manage_groups")
 	configGroupAddCmd.Short = i18n.T("cmd_group_add")
 	configGroupRemoveCmd.Short = i18n.T("cmd_group_remove")
@@ -486,6 +503,7 @@ func init() {
 	configCmd.AddCommand(configScanCmd)
 	configCmd.AddCommand(configLanguageCmd)
 	configCmd.AddCommand(configValidateCmd)
+	configCmd.AddCommand(configNormalizeCmd)
 	configCmd.AddCommand(configGroupCmd)
 
 	configGroupCmd.AddCommand(configGroupAddCmd)

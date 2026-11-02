@@ -6,7 +6,7 @@
 
 - **技术栈**：Go 1.22 / github.com/spf13/cobra v1.8.1；模块名 `github.com/wamdy/gits`
 - **构建**：`go build -o gits .`（Windows 产物 `gits.exe`，仓库内已存编译产物）
-- **配置文件**：从当前工作目录开始逐级向上查找 `.gits/config.json`，使用最近的配置（写入也落在该文件）；直到根目录仍未找到时，回退到当前工作目录下的 `.gits/config.json`（首次保存时创建）。JSON，含 version/language/repositories/groups/defaults
+- **配置文件**：从当前工作目录开始逐级向上查找 `.gits/config.json`，使用最近的配置（写入也落在该文件）；直到根目录仍未找到时，回退到当前工作目录下的 `.gits/config.json`（首次保存时创建）。JSON，含 version/language/repositories/groups/defaults；`repositories[].path` 以**实际命中的** `.gits` 所在目录为基准存相对路径（读取时解析为绝对路径，存量绝对路径兼容）
 
 ## 目录结构与职责
 
@@ -15,14 +15,14 @@
 | `main.go` | 入口，调用 `cmd.Execute()` |
 | `cmd/root.go` | 根命令 + 全局选项：`-g/--group`、`-r/--repo`（ID/区间/名称通配/名称）、`-p/--parallel`、`-y/--yes`、`--color=auto\|always\|never`、`--no-color`；i18n 初始化；启动时校验 `--color` 并调用 `ui.InitColorMode`；git 代理参数提取（`--` 分隔符） |
 | `cmd/git.go` | Git 命令代理：仓库选择（`repo.ResolveSelection` 解析 `-r` / 分组 / 全部）、review 确认、串行/并行执行、汇总 |
-| `cmd/config.go` | config 子命令：add/remove/show/rename/reid/scan/language/validate/group（add/assign/unassign/show） |
-| `internal/config/loader.go` | `Config`/`Repository` 结构体、配置加载/保存/原始 JSON |
+| `cmd/config.go` | config 子命令：add/remove/show/rename/reid/scan/language/validate/normalize/group（add/assign/unassign/show） |
+| `internal/config/loader.go` | `Config`/`Repository` 结构体、配置加载/保存/原始 JSON；路径相对化（`ConfigBaseDir`/`ResolvePath`/`StoredPath`/`NormalizePaths`） |
 | `internal/config/manager.go` | 配置操作：仓库增删改查、分组管理、repo-ref 解析（ID/名称/路径）、ID 重排、校验清理 |
 | `internal/git/executor.go` | git 命令执行封装（`exec.Command("git", ...)`）、`ExecutionResult`、branch/status/is-git 快捷方法、`BranchExists`（分支存在检查） |
 | `internal/i18n/i18n.go` | 中/英双语字典，`i18n.T(key, args...)` 取文案 |
 | `internal/repo/discover.go` | 仓库发现：`Discover()` 目录遍历找 `.git`（跳过 9 种噪音目录）+ 8-worker pool 并发采集 branch/status；`GetRepositoryInfo` |
 | `internal/repo/manager.go` | 仓库管理门面（转发到 config 包）+ `ResolveSelection`/`FindReposByWildcard`/`FindReposByBranch`（ID/区间/通配/名称/分支选择） |
-| `internal/ui/printer.go` | 输出格式化：表格、分组、review 提示、**ANSI 颜色**（`ColorMode` 变量，`InitColorMode` 按终端能力置 ANSI 或空串） |
+| `internal/ui/printer.go` | 输出格式化：表格、分组、review 提示、config show 配置项/默认值块、**ANSI 颜色**（`ColorMode` 变量，`InitColorMode` 按终端能力置 ANSI 或空串） |
 | `internal/ui/isvt_windows.go` / `isvt_other.go` | 平台差异的 `supportsVT()`：Windows 查 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`；其余平台恒 true |
 
 ## 命名与约定
@@ -37,4 +37,4 @@
 ## 测试
 
 - 内置 `test-repos/`（repo1/repo2/repo3，均为 git 仓库）用于手工验证多仓库操作
-- Go 单测：`internal/repo`（`ResolveSelection`/`ResolveSelectionByBranch`/`FindReposByWildcard`/`isNoiseDir`）、`internal/ui`（`InitColorMode`）；运行 `go test ./...`
+- Go 单测：`internal/repo`（`ResolveSelection`/`ResolveSelectionByBranch`/`FindReposByWildcard`/`isNoiseDir`）、`internal/ui`（`InitColorMode`）、`internal/config`（路径相对化/解析/搬迁/normalize）；运行 `go test ./...`
