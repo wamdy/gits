@@ -36,7 +36,47 @@ func init() {
 	if err != nil {
 		cwd = "."
 	}
-	configPath = filepath.Join(cwd, ".gits", "config.json")
+	configPath = locateConfig(cwd)
+}
+
+// locateConfig 从 startDir 开始逐级向上查找 .gits/config.json，
+// 找到即返回该路径；直到文件系统根目录仍未找到时，回退到 startDir 下的默认路径
+// （便于首次运行在当前位置创建配置）。
+func locateConfig(startDir string) string {
+	return locateConfigUntil(startDir, "")
+}
+
+// locateConfigUntil 实现向上查找；stopDir 非空时只查到该目录（含）为止，
+// 空值表示一直查到文件系统根目录。
+func locateConfigUntil(startDir, stopDir string) string {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		dir = startDir
+	}
+	stop := stopDir
+	if stop != "" {
+		if abs, err := filepath.Abs(stop); err == nil {
+			stop = abs
+		}
+	}
+
+	for {
+		candidate := filepath.Join(dir, ".gits", "config.json")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+
+		if stop != "" && dir == stop {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return filepath.Join(startDir, ".gits", "config.json")
 }
 
 func Load() (*Config, error) {

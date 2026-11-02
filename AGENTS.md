@@ -6,7 +6,7 @@
 
 - **技术栈**：Go 1.22 / github.com/spf13/cobra v1.8.1；模块名 `github.com/wamdy/gits`
 - **构建**：`go build -o gits .`（Windows 产物 `gits.exe`，仓库内已存编译产物）
-- **配置文件**：当前工作目录 `.gits/config.json`（JSON，含 version/language/repositories/groups/defaults）
+- **配置文件**：从当前工作目录开始逐级向上查找 `.gits/config.json`，使用最近的配置（写入也落在该文件）；直到根目录仍未找到时，回退到当前工作目录下的 `.gits/config.json`（首次保存时创建）。JSON，含 version/language/repositories/groups/defaults
 
 ## 目录结构与职责
 
