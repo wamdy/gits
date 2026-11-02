@@ -469,6 +469,12 @@ func RenameRepository(repoRef string, newName string) error {
 	}
 
 	id, path, _ := ParseRepoRef(repoRef)
+	if path != "" {
+		// 配置中的 Path 已解析为绝对路径；用户传入的路径引用可能是相对路径。
+		if abs, err := filepath.Abs(path); err == nil {
+			path = filepath.Clean(abs)
+		}
+	}
 	found := false
 	for i := range cfg.Repositories {
 		if id > 0 && cfg.Repositories[i].ID == id {

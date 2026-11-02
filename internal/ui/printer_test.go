@@ -1,7 +1,14 @@
 package ui
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"strings"
 	"testing"
+
+	"github.com/wamdy/gits/internal/config"
+	"github.com/wamdy/gits/internal/i18n"
 )
 
 func TestInitColorMode(t *testing.T) {
@@ -51,4 +58,68 @@ func resetColors() {
 	ColorBlue = ""
 	ColorPurple = ""
 	ColorCyan = ""
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(): %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return buf.String()
+}
+
+func TestPrintConfigSettings(t *testing.T) {
+	resetColors()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(i18n.Zh)
+
+	cfg := &config.Config{
+		Version:      "1.0.0",
+		Language:     "",
+		Repositories: []config.Repository{},
+		Groups:       map[string][]int{},
+		Defaults:     config.Defaults{Remote: "origin", Branch: "main"},
+	}
+
+	out := captureStdout(t, func() { PrintConfigSettings(cfg) })
+
+	for _, want := range []string{"配置项", "版本: 1.0.0", "语言: （未设置）", "默认远程: origin", "默认分支: main"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("PrintConfigSettings output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintConfigSettingsEnglish(t *testing.T) {
+	resetColors()
+	i18n.SetLang(i18n.En)
+	defer i18n.SetLang(i18n.Zh)
+
+	cfg := &config.Config{
+		Version:  "1.0.0",
+		Language: "en",
+		Defaults: config.Defaults{Remote: "upstream", Branch: "develop"},
+	}
+
+	out := captureStdout(t, func() { PrintConfigSettings(cfg) })
+
+	for _, want := range []string{"Configuration", "Language: en", "Default remote: upstream", "Default branch: develop"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("PrintConfigSettings output missing %q:\n%s", want, out)
+		}
+	}
 }

@@ -82,6 +82,7 @@ gits [全局选项] <命令> [参数]
 │   │   │   └── -a, --all                     重排所有 ID 从 1 开始
 │   │   ├── scan [path]         扫描目录发现仓库，交互选择添加
 │   │   ├── validate            校验并清理配置（移除无效分组引用）
+│   │   ├── normalize           仓库路径改写为相对 .gits 所在目录
 │   │   └── group               分组管理
 │   │       ├── add <name>      创建仓库分组
 │   │       ├── remove <name>   删除仓库分组
@@ -121,7 +122,8 @@ gits [全局选项] <命令> [参数]
 | `gits config add <path> --name <name> --id <id>` | 同时指定名称和 ID | `gits config add ./services/user-service --name user-svc --id 100` |
 | `gits config remove <repo-ref>` | 从管理列表移除仓库（支持 ID、名称或路径） | `gits config remove 1` |
 | `gits config validate` | 校验并清理配置（检查仓库路径、移除无效引用和空分组） | `gits config validate` |
-| `gits config show` | 显示当前管理的仓库列表（含 ID、名称、路径、分组） | `gits config show` |
+| `gits config normalize` | 把仓库路径改写为相对 `.gits` 所在目录的路径（存量绝对路径迁移） | `gits config normalize` |
+| `gits config show` | 显示当前管理的仓库列表（含 ID、名称、路径、分组）及全局配置项与默认值（版本/语言/默认远程/默认分支） | `gits config show` |
 | `gits config show --raw` | 以 JSON 格式显示原始配置文件内容 | `gits config show -r` |
 | `gits config rename <repo-ref> <new-name>` | 修改仓库名称（支持 ID、名称或路径引用） | `gits config rename 1 user-svc` |
 | `gits config reid <old-id> <new-id>` | 修改仓库 ID（同步更新所有分组引用） | `gits config reid 2 5` |
@@ -455,6 +457,23 @@ gits -g shared -- status
 <current-directory>/.gits/config.json
 ```
 
+### 仓库路径存储形态
+
+`repositories[].path` 落盘时以 **`.gits` 所在目录**（即 `<current-directory>`）为基准保存为相对路径，例如：
+
+```json
+{ "id": 1, "path": "services/user-service", "name": "user-svc", "groups": [] }
+```
+
+- 读取时基于 `config.json` 所在目录的父目录解析为绝对路径，批量 Git 命令与 `config show` 均使用解析后的绝对路径。
+- 把整个项目目录（连同 `.gits` 与各仓库）移动到别处后无需改配置。
+- 存量配置中的绝对路径继续可用；任一写配置命令落盘时自动改为相对形态，也可执行 `gits config normalize` 显式迁移。
+- 无法相对化的场景（如 Windows 跨盘符）保留绝对路径，不报错。
+- 落盘统一使用 `/` 分隔符，读取兼容 `/` 与平台原生分隔符。
+- 相对路径配置需要本版本或更新版本读取；旧版本会把相对值按当前工作目录原样使用，仅在 cwd 等于配置基目录时可用。
+- `config show --raw` 展示落盘形态；`config show` 展示解析后的绝对路径。
+- `config show` 同时列出全局配置项与默认值（版本、语言、默认远程、默认分支），即使尚未添加仓库也会显示默认值；`config show --raw` 可查看完整 JSON 键值。
+
 ### 使用示例
 
 ```bash
@@ -463,6 +482,9 @@ gits config show
 
 # 添加仓库到当前目录配置
 gits config add ./services/user-service
+
+# 把存量绝对路径迁移为相对路径
+gits config normalize
 ```
 
 ### 配置结构
@@ -472,13 +494,13 @@ gits config add ./services/user-service
   "repositories": [
     {
       "id": 1,
-      "path": "/path/to/repo1",
+      "path": "repos/repo1",
       "name": "repo1",
       "groups": ["backend", "core"]
     },
     {
       "id": 2,
-      "path": "/path/to/repo2",
+      "path": "repos/repo2",
       "name": "repo2",
       "groups": ["frontend"]
     }
