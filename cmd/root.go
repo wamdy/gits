@@ -49,11 +49,20 @@ func extractGitArgs(args []string) []string {
 	return args
 }
 
+// rootLongText 组装 root 的 Long：一句话说明 + worktree 子命令的兼容口径（TQ-04）。
+// `worktree` 注册为子命令后 `gits worktree <sub>` 不再透传给 git，
+// 裸 git worktree 透传形态改为 `gits -r <sel> -- worktree <sub>`；
+// 文案集中在 i18n（zh/en 成对），init 与 Execute 两处都走本函数，切语言即刻生效。
+func rootLongText() string {
+	return "gits - " + i18n.T("git_cmd_desc") + "\n\n" + i18n.T("worktree_passthrough_note")
+}
+
 func init() {
 	initI18n()
 
 	rootCmd.Short = i18n.T("manage_multi_repos")
-	rootCmd.Long = `gits - ` + i18n.T("git_cmd_desc")
+	rootCmd.Long = rootLongText()
+	rootCmd.AddCommand(worktreeCmd)
 
 	rootCmd.PersistentFlags().StringVarP(&group, "group", "g", "", i18n.T("execute_on_group"))
 	rootCmd.PersistentFlags().StringVarP(&repoIDs, "repo", "r", "", i18n.T("execute_on_repos"))
@@ -89,7 +98,7 @@ func Execute() {
 
 	// 动态设置命令描述（语言可能在上一次运行中被修改）
 	rootCmd.Short = i18n.T("manage_multi_repos")
-	rootCmd.Long = `gits - ` + i18n.T("git_cmd_desc")
+	rootCmd.Long = rootLongText()
 	rootCmd.PersistentFlags().Lookup("group").Usage = i18n.T("execute_on_group")
 	rootCmd.PersistentFlags().Lookup("repo").Usage = i18n.T("repo_selection_note")
 	rootCmd.PersistentFlags().Lookup("parallel").Usage = i18n.T("execute_parallel")
@@ -98,6 +107,7 @@ func Execute() {
 	rootCmd.PersistentFlags().Lookup("no-color").Usage = i18n.T("no_color_desc")
 
 	initConfigCmdI18n()
+	initWorktreeCmdI18n()
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

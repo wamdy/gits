@@ -16,15 +16,26 @@ import (
 var errNoRepositories = errors.New("no repositories registered")
 
 // repoDisplayNames 生成仓库回显用的名称列表（review 确认提示与逐仓结果行共用）。
-// 每项为 `[ID] 名称 (当前分支/短 commit id)`（复用 DisplayBranch + DisplayLabel，
-// 口径与 config show / group show / scan 一致）；空仓库（展示值为空串）只省略分支后缀。
-func repoDisplayNames(repos []repo.RepositoryInfo) []string {
-	names := make([]string, len(repos))
-	for i, r := range repos {
-		branch := repo.DisplayBranch(git.GetBranchName(r.Path), r.Path)
-		names[i] = repo.DisplayLabel(r.ID, r.Name, branch)
+// 每项为 `[ID] 名称 (当前分支/短 commit id) ← 主仓`（复用 repo.RepoLabels，
+// 口径与 config show / group show / scan 一致）；空仓库（展示值为空串）只省略分支后缀，
+// 非 worktree 省略 ` ← 主仓` 归属标记。
+func repoDisplayNames(repos []repo.RepositoryInfo, allRepos []config.Repository) []string {
+	return repo.RepoLabels(repos, allRepos)
+}
+
+// toRepositoryInfos 把选中的已登记仓库转为执行/回显用信息，并运行时补出 worktree 归属
+// （linked worktree 带主仓路径；普通仓库为空串——身份不落配置）。
+func toRepositoryInfos(repos []config.Repository) []repo.RepositoryInfo {
+	infos := make([]repo.RepositoryInfo, 0, len(repos))
+	for _, r := range repos {
+		infos = append(infos, repo.RepositoryInfo{
+			ID:         r.ID,
+			Path:       r.Path,
+			Name:       r.Name,
+			WorktreeOf: repo.DetectWorktreeOf(r.Path),
+		})
 	}
-	return names
+	return infos
 }
 
 // selectRepos 根据 -r / -g / 默认 三种模式选择目标仓库。
@@ -44,43 +55,25 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 	var repos []repo.RepositoryInfo
 	switch {
 	case repoIDStr != "":
-		// 按 ID / ID 区间 / 名称通配 / 名称精确 / branch: 选择仓库（ResolveSelection 内部去重）
-		selected, err := repo.ResolveSelection(repoIDStr, cfg.Repositories, repo.DefaultBranchChecker)
+		// 按 ID / ID 区间 / 名称通配 / 名称精确 / branch: / set: 选择仓库（内部按 ID 去重）
+		selected, err := repo.ResolveSelectionWithSets(repoIDStr, cfg.Repositories, cfg.WorktreeSets, repo.DefaultBranchChecker)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range selected {
-			repos = append(repos, repo.RepositoryInfo{
-				ID:   r.ID,
-				Path: r.Path,
-				Name: r.Name,
-			})
-		}
+		repos = toRepositoryInfos(selected)
 	case groupName != "":
 		configRepos, err := repo.GetRepositoriesByGroup(groupName)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range configRepos {
-			repos = append(repos, repo.RepositoryInfo{
-				ID:   r.ID,
-				Path: r.Path,
-				Name: r.Name,
-			})
-		}
+		repos = toRepositoryInfos(configRepos)
 	default:
 		// 使用配置中的全部仓库
 		registered, err := repo.GetRegisteredRepositories()
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range registered {
-			repos = append(repos, repo.RepositoryInfo{
-				ID:   r.ID,
-				Path: r.Path,
-				Name: r.Name,
-			})
-		}
+		repos = toRepositoryInfos(registered)
 	}
 	return repos, nil
 }
@@ -115,8 +108,8 @@ func runGitCommand(args []string) {
 		return
 	}
 
-	// 回显用名称（含 ID 与当前分支）一次算好，review 提示与逐仓结果行共用
-	names := repoDisplayNames(repos)
+	// 回显用名称（含 ID、当前分支与 worktree 归属）一次算好，review 提示与逐仓结果行共用
+	names := repoDisplayNames(repos, cfg.Repositories)
 
 	if !GetYes() {
 		if !ui.PrintReviewPrompt(names, args[0], args[1:]) {
