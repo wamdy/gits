@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,54 @@ func gitInit(t *testing.T, dir string) {
 	if err := exec.Command("git", "init", "-q", dir).Run(); err != nil {
 		t.Fatalf("git init %s: %v", dir, err)
 	}
+}
+
+// gitCommitIn 在 dir 内提交一次空提交：worktree add 需要一个有效分支点。
+func gitCommitIn(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git",
+		"-c", "user.email=gits-test@example.com", "-c", "user.name=gits-test",
+		"-c", "commit.gpgsign=false",
+		"commit", "-q", "--allow-empty", "-m", "init")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit in %s: %v\n%s", dir, err, out)
+	}
+}
+
+// gitWorktreeAdd 从主仓拉一个 linked worktree（`.git` 落为文件）。
+func gitWorktreeAdd(t *testing.T, mainRepo, worktreeDir, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "-c", "user.email=gits-test@example.com", "-c", "user.name=gits-test",
+		"worktree", "add", "-b", branch, worktreeDir)
+	cmd.Dir = mainRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add %s (from %s): %v\n%s", worktreeDir, mainRepo, err, out)
+	}
+}
+
+// gitSeparateGitDirCheckout 构造与 submodule 同形态的 `.git` 文件目录：
+// git-dir 与 common-dir 同指独立目录（判定底座的 KindSubmodule 分支）。
+func gitSeparateGitDirCheckout(t *testing.T, workDir, gitDir string) {
+	t.Helper()
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatalf("mkdir git dir %s: %v", gitDir, err)
+	}
+	cmd := exec.Command("git", "init", "-q", "--separate-git-dir="+gitDir, workDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --separate-git-dir %s: %v\n%s", workDir, err, out)
+	}
+}
+
+// sameDir（路径比较，Windows 大小写不敏感）沿用 manager.go 的生产实现，测试不再自带副本。
+
+// byBaseName 按目录名索引发现结果，便于断言。
+func byBaseName(repos []RepositoryInfo) map[string]RepositoryInfo {
+	m := make(map[string]RepositoryInfo, len(repos))
+	for _, r := range repos {
+		m[filepath.Base(filepath.FromSlash(r.Path))] = r
+	}
+	return m
 }
 
 func TestIsNoiseDir(t *testing.T) {
@@ -131,5 +180,157 @@ func TestDiscoverRootIsGitRepo(t *testing.T) {
 	}
 	if !foundSub {
 		t.Errorf("sub repo not discovered; got %v", names)
+	}
+}
+
+// TestDiscoverLinkedWorktreeIsFound 验证 AC-01.1 的根因修复：
+// `.git` 是文件（linked worktree）不再被 IsDir 门吞掉，主仓与 worktree 都进候选，
+// 且 worktree 带 WorktreeOf（主仓路径）供列出口径反查主仓名。
+func TestDiscoverLinkedWorktreeIsFound(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "repo-main")
+	gitInit(t, main)
+	gitCommitIn(t, main)
+
+	wt := filepath.Join(root, ".worktrees", "demo", "wt-main")
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitWorktreeAdd(t, main, wt, "feature/x")
+
+	got, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover(%s) = _, %v", root, err)
+	}
+
+	byName := byBaseName(got)
+	if len(got) != 2 {
+		t.Fatalf("discovered = %d 条 %v, want 2（主仓 + linked worktree）", len(got), got)
+	}
+	mainInfo, ok := byName["repo-main"]
+	if !ok {
+		t.Fatalf("主仓未被发现: %v", got)
+	}
+	if mainInfo.WorktreeOf != "" {
+		t.Errorf("主仓 WorktreeOf = %q, want empty", mainInfo.WorktreeOf)
+	}
+
+	wtInfo, ok := byName["wt-main"]
+	if !ok {
+		t.Fatalf("linked worktree %s 未被发现: %v", wt, got)
+	}
+	if !sameDir(wtInfo.WorktreeOf, main) {
+		t.Errorf("worktree WorktreeOf = %q, want 主仓 %q", wtInfo.WorktreeOf, main)
+	}
+	if wtInfo.Branch != "feature/x" {
+		t.Errorf("worktree Branch = %q, want feature/x", wtInfo.Branch)
+	}
+}
+
+// TestDiscoverSkipsSubmodule 验证 AC-01.2 的 Q5 口径：submodule（`.git` 文件且
+// git-dir == common-dir）不进候选、不报错。
+func TestDiscoverSkipsSubmodule(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "repo-main")
+	gitInit(t, main)
+	gitCommitIn(t, main)
+
+	sub := filepath.Join(root, "loose-sub")
+	subGit := filepath.Join(root, "modules", "loose-sub")
+	if err := os.MkdirAll(filepath.Dir(subGit), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitSeparateGitDirCheckout(t, sub, subGit)
+
+	got, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover(%s) = _, %v（submodule 不应导致报错）", root, err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("discovered = %d 条 %v, want 1（只有主仓）", len(got), got)
+	}
+	if !sameDir(got[0].Path, main) {
+		t.Errorf("discovered[0].Path = %q, want 主仓 %q", got[0].Path, main)
+	}
+
+	// 直接扫描 submodule 检出目录：0 候选，仍不报错。
+	only, err := Discover(sub)
+	if err != nil {
+		t.Fatalf("Discover(submodule) = _, %v", err)
+	}
+	if len(only) != 0 {
+		t.Errorf("Discover(submodule) = %v, want 空", only)
+	}
+}
+
+// TestDiscoverWorktreeAndSubmoduleMixed 三态同现于一次扫描：主仓 + worktree 进候选、
+// submodule 被跳过（AC-01.1 / AC-01.2 组合口径）。
+func TestDiscoverWorktreeAndSubmoduleMixed(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "repo-main")
+	gitInit(t, main)
+	gitCommitIn(t, main)
+
+	wt := filepath.Join(root, ".worktrees", "demo", "wt-a")
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitWorktreeAdd(t, main, wt, "feature/y")
+
+	sub := filepath.Join(root, ".worktrees", "demo", "loose-sub")
+	gitSeparateGitDirCheckout(t, sub, filepath.Join(root, "modules", "loose-sub"))
+
+	got, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover(%s) = _, %v", root, err)
+	}
+
+	names := make([]string, 0, len(got))
+	for _, r := range got {
+		names = append(names, r.Name)
+	}
+	sort.Strings(names)
+
+	want := []string{"repo-main", "wt-a"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("discovered = %v, want %v（submodule 应被跳过）", names, want)
+	}
+	for _, r := range got {
+		switch r.Name {
+		case "wt-a":
+			if !sameDir(r.WorktreeOf, main) {
+				t.Errorf("wt-a WorktreeOf = %q, want %q", r.WorktreeOf, main)
+			}
+		case "repo-main":
+			if r.WorktreeOf != "" {
+				t.Errorf("repo-main WorktreeOf = %q, want empty", r.WorktreeOf)
+			}
+		}
+	}
+}
+
+// TestGetRepositoryInfoWorktreeOf 验证单仓信息采集同样带出 worktree 归属。
+func TestGetRepositoryInfoWorktreeOf(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "repo-main")
+	gitInit(t, main)
+	gitCommitIn(t, main)
+	wt := filepath.Join(root, "wt-main")
+	gitWorktreeAdd(t, main, wt, "feature/z")
+
+	info, err := GetRepositoryInfo(wt)
+	if err != nil {
+		t.Fatalf("GetRepositoryInfo(worktree) = _, %v", err)
+	}
+	if !sameDir(info.WorktreeOf, main) {
+		t.Errorf("GetRepositoryInfo(worktree).WorktreeOf = %q, want %q", info.WorktreeOf, main)
+	}
+
+	mainInfo, err := GetRepositoryInfo(main)
+	if err != nil {
+		t.Fatalf("GetRepositoryInfo(main) = _, %v", err)
+	}
+	if mainInfo.WorktreeOf != "" {
+		t.Errorf("GetRepositoryInfo(main).WorktreeOf = %q, want empty", mainInfo.WorktreeOf)
 	}
 }

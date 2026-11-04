@@ -90,6 +90,17 @@ gits [全局选项] <命令> [参数]
 │   │       ├── unassign <group> <repo-ref>  从分组移除仓库
 │   │       └── show [<group>]  显示分组及成员列表
 │   │
+│   ├── worktree              多仓 worktree 集合管理（子命令，不再透传给 git）
+│   │   ├── add [集合名]       为选中的每个仓库各建一个 worktree 并登记为具名集合
+│   │   │   ├── -r, --repo     仓库选择（ID/区间/通配/名称/branch:/set:，与 -g 互斥）
+│   │   │   ├── --branch       worktree 分支（优先于配置 defaults.branch；两者都缺则报错，不猜各仓 HEAD）
+│   │   │   ├── --dir          worktree 根目录（缺省 <配置基目录>/.worktrees/<集合名>）
+│   │   │   └── -y, --yes      跳过执行前 review 确认
+│   │   ├── list [集合名]      列出集合与成员（`[ID] 名称 (检出分支) 路径`，目录消失标 missing）
+│   │   ├── remove <集合名>    拆除集合全部成员（任一脏即整组中止；永不删分支）
+│   │   │   └── --force        把 --force 透传给 git worktree remove 以越过脏检查
+│   │   └── prune              只清理登记中已不存在的成员（不删磁盘目录、不调 git worktree prune）
+│   │
 │   └── <git-command>           Git 命令代理（批量执行所有 git 命令）
 │       ├── status              批量查看状态
 │       ├── pull [remote] [branch]   批量拉取
@@ -159,6 +170,25 @@ gits [全局选项] <命令> [参数]
 |------|------|------|
 | `gits -g <group> -- <command>` | 对指定分组执行命令 | `gits -g backend -- pull` |
 
+#### 5. worktree 集合管理
+一条命令为多个仓库按同一分支各建一个 linked worktree，归拢到一个根目录并登记为具名集合（`.gits/config.json` 的 `worktree_sets`）。
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `gits worktree add <集合名> -r <选择> --branch <分支>` | 为选中仓库各建一个 worktree 并登记为集合；落位 `<配置基目录>/.worktrees/<集合名>/<仓名>`。**必须显式给 `-r`（或 `-g`）**——不给时直接报错退出，不会退化成「全部登记仓库」 | `gits worktree add 20261104-demo -r 1,3 --branch harness/20261104-demo` |
+| `gits worktree add -r <选择> --branch <分支>` | 集合名缺省为分支名去掉 `harness/` 前缀后的 slug（同名集合已存在则拒绝，不覆盖） | `gits worktree add -r set:base --branch harness/x` |
+| `gits worktree add ... --dir <根>` | 覆盖默认根目录 | `gits worktree add demo -r 1-4 --branch dev --dir D:/wt/demo` |
+| `gits worktree list [集合名]` | 列出集合与成员：`[ID] 名称 (检出分支) 路径`，目录已消失的成员标 `missing` | `gits worktree list demo` |
+| `gits worktree remove <集合名>` | 拆除全部成员后删除集合登记，并**回收 `add` 自动登记的仓库条目**；**任一成员脏即整组中止并点名**，**永不删分支** | `gits worktree remove demo` |
+| `gits worktree remove <集合名> --force` | 把 `--force` 透传给 `git worktree remove` 越过脏检查（只作用于 worktree 本身，仍不删分支） | `gits worktree remove demo --force` |
+| `gits worktree prune` | **只清登记**：路径不存在的成员移出集合、空集合删除，并回收这些成员对应的自动登记条目；不删磁盘目录、不调用 `git worktree prune` | `gits worktree prune` |
+
+`add` 的执行顺序：**阶段 A 预检（只读）→ 阶段 B 创建 → 阶段 C 登记**。
+- 预检逐项检查：submodule 排除、分支存在性（`--branch` > `defaults.branch`，两者都缺直接报错，不猜各仓 HEAD）、**该分支是否已被本仓的某个 worktree 检出**（同一分支 git 只能被一个 worktree 检出，最常见的踩点是缺省落到 `defaults.branch=main` 而 `main` 正检出在主仓——现在预检就点名，不再等到创建阶段失败再回滚）、目标路径是否被占用、成员是否重复。任一失败 → **一个 worktree 都不建**，逐仓点名（含缺分支仓的名字与它当前分支）并以非零码退出。
+- 创建中途失败 → 只回滚**本次调用**新建的 worktree（内存记账路径清单），调用前既有集合与磁盘不受影响，并点名失败仓；不写集合登记。
+- 默认执行前 review 列出成员与目标路径，`-y` 跳过。
+- `gits worktree <未知子命令>` 报错并以非零码退出（不再静默打 help 后返回 0）；裸 `gits worktree` 仍打 help。
+
 ---
 
 ## 仓库引用方式
@@ -204,6 +234,25 @@ gits -r 1-3,branch:feature/X -- pull
 
 说明：`branch:feature/X` 等价于仓库同时命中 `refs/heads/feature/X` 或 `refs/remotes/*/feature/X` 中任一分支；`pattern` 支持 `*` 与 `?` 通配。
 
+### 按 worktree 集合选择（`set:` 段）
+
+`-r` 还支持 `set:<集合名>` 段，选中某个 worktree 集合的**全部成员工作区**（按成员的 `repo_id` 命中，与 ID/区间/通配/名称/`branch:` 混用时按 ID 去重）；集合名不存在直接报错点名，不会静默返回空。
+
+⚠️ **成员的 `repo_id` 指向「worktree 目录自己的仓库条目」，不是父仓条目**：`gits worktree add` 在创建 worktree 后会为每个 worktree 目录自动登记一条仓库条目（名称形如 `repo1@demo`，同一路径已存在则复用）。因此 `gits -r set:demo -- status` 是在各 worktree 目录内执行（检出的是集合的那个分支），**不会**打到父仓主工作区。这条是实测纠错：早期实现把成员指向父仓，导致集合命令跑在主仓上，门全绿而功能不可用。
+
+```bash
+# 对集合 demo 的全部成员批量看状态
+gits -r set:demo -- status
+
+# 与 ID 段并集
+gits -r 1,set:demo -- fetch
+
+# 用集合成员作为新集合的来源（在已有集合的仓库上再建一组）
+gits worktree add demo2 -r set:demo --branch harness/next
+```
+
+`config show`、`config group show`、`config scan` 与批量执行的结果行，对 linked worktree 统一标注 `← 主仓名`（同一套函数产出，不各自拼接）。
+
 ---
 
 ## Review 确认功能
@@ -241,8 +290,12 @@ gits -y -- clean -fd
 ```
 
 ### 支持 review 的命令
-所有通过 Git 命令代理执行的命令在执行前都会显示 review 确认提示：
+所有可能影响仓库状态的命令在执行前都会显示 review 确认提示（`-y/--yes` 跳过）：
 - `gits <git-command>` — 所有 Git 命令代理
+- `gits worktree add <集合名> …` — 列出集合名、分支、根目录与各成员目标路径
+- `gits worktree remove <集合名> …` — 列出将被拆除的成员与其路径（`--force` 时附警告）
+
+`gits worktree list` / `gits worktree prune` 只读或只清登记，不产生破坏性操作，不询问确认。
 
 ---
 
@@ -270,6 +323,20 @@ gits [gits-flags] -- [git-command] [git-flags]
 ```
 
 > **建议**：当 Git 命令参数与 gits 参数同名时，使用 `--` 分隔符确保正确传递。
+
+### `worktree` 子命令与 `--` 透传的关系
+
+`worktree` 已注册为 gits 子命令，因此 **`gits worktree <子命令>` 不再透传给 git**——它执行的是 gits 的集合管理命令（add/list/remove/prune）。要执行原生的 `git worktree …`，必须走透传形态：
+
+```bash
+# 原生 git worktree（透传形态）：列出各仓的 worktree
+gits -r 1,3 -y -- worktree list
+
+# gits 集合命令（不透传）：拆除集合
+gits worktree remove demo
+```
+
+该口径在 `gits --help` 与 `gits worktree --help` 的说明里都显式写出。历史脚本里的 `gits worktree list`（透传语义）需要改为上面第一行的写法。
 
 ---
 
@@ -513,9 +580,33 @@ gits config normalize
   "defaults": {
     "remote": "origin",
     "branch": "main"
-  }
+  },
+  "worktree_sets": [
+    {
+      "name": "20261104-demo",
+      "branch": "harness/20261104-demo",
+      "members": [
+        { "repo_id": 3, "path": ".worktrees/20261104-demo/repo1" },
+        { "repo_id": 4, "path": ".worktrees/20261104-demo/repo2" }
+      ]
+    }
+  ]
 }
 ```
+
+`worktree_sets` 为**可选键**（无集合时整键不写，`version` 仍是 `1.0.0`）：
+- `members[].repo_id` 指向 **worktree 目录自己的仓库条目**（示例中的 3/4，即 `worktree add` 自动登记的 `repo1@20261104-demo` 等），**不是**父仓条目 1/2——`-r set:` 靠它把命令投递到正确的 worktree 目录。
+- `members[].path` 与 `repositories[].path` 走同一相对化口径（相对 `.gits` 所在目录，读取解析为绝对路径，跨盘退化为绝对路径），整目录搬迁不断链。
+- 仓库条目里**不落** worktree 身份字段：linked worktree / submodule 由 git 运行时判定，配置与磁盘不漂移。
+- `config remove` 删仓时，该仓库在集合里的成员被连带移出（集合清空则删除集合），输出点名受影响的集合名；`config validate` 兜底清理指向已不存在仓库 ID 的悬空成员。
+- `config reid <旧> <新>` 与 `config reid --all` 会同步回写成员的 `repo_id`，重排 ID 后 `-r set:<集合>` 仍能全选成员（不回写时 `set:` 会静默漏选、`config validate` 还会把成员当悬空删掉）。
+- `worktree remove` / `worktree prune` 除清集合登记外，一并回收 `worktree add` 为这些成员自动登记的仓库条目（只回收路径也匹配上的条目，你手工登记的仓不受影响），避免默认全量批量命令每次都为死条目报 `chdir` 失败。
+
+### 已知限制
+- **老版本 gits 读新配置会丢集合**：旧版本能正常解析含 `worktree_sets` 的配置（未知键被忽略），但它任一写配置的操作都会整篇重写，`worktree_sets` 键随之丢失。带集合的配置请用本版本或更新版本。
+- **`branch:` 对同仓多 worktree 会全部命中**：同一主仓的多个 worktree 共享 refs，`branch:<pattern>` 的判据（`for-each-ref`）与该目录当前检出什么分支无关，因此按分支过滤会把该主仓的所有 worktree 一起选中。修复另立 GitLab 缺陷票 **#1067**；本期 `worktree list` / `set:` 给出的是集合成员身份，不受此影响。
+- **submodule 内不建 worktree**：判定为 submodule 的成员在 `worktree add` 预检阶段直接点名拒绝（`config scan` 也跳过 submodule），本期不支持。
+- **`prune` / `remove` 不碰磁盘与分支**：`prune` 只清理登记（不删目录、不调 `git worktree prune`）；`remove` 永不执行 `git branch -D`。手工删除 worktree 目录后，主仓 `.git/worktrees` 里的记录需由 git 自身处理（`git worktree list` 会标 `prunable`）。
 
 ---
 
@@ -532,6 +623,7 @@ gits/
 │   ├── root.go             # 根命令（全局选项）
 │   ├── config.go           # config 子命令（add/remove/show/scan/group）
 │   ├── git.go              # Git 命令代理（串行/并行执行）
+│   ├── worktree.go         # worktree 命令族（add/list/remove/prune，三阶段建组）
 │   └── mock.go             # mock 测试命令
 ├── internal/
 │   ├── config/             # 配置管理
@@ -619,6 +711,15 @@ git log --oneline -n 10
 gits -- status
 gits -- pull origin main
 gits -- log --oneline -n 10
+```
+
+### 例外：`worktree`
+`worktree` 是 gits 的子命令，**不透传**给 git（`gits worktree <sub>` 走集合管理）。原生 `git worktree …` 的批量形态要写成 `gits -r <选择> -- worktree <sub>`，例如：
+
+```bash
+git worktree list
+gits -r 1,3 -y -- worktree list      # gits 等价命令（透传形态）
+gits worktree list                   # ← 这是 gits 的集合列表，不是 git worktree list
 ```
 
 ---

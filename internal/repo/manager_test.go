@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/wamdy/gits/internal/config"
 	"github.com/wamdy/gits/internal/git"
+	"github.com/wamdy/gits/internal/i18n"
 )
 
 func TestFindReposByWildcard(t *testing.T) {
@@ -259,5 +262,192 @@ func TestDisplayLabel(t *testing.T) {
 		if got := DisplayLabel(c.id, c.name, c.branch); got != c.want {
 			t.Errorf("DisplayLabel(%d, %q, %q) = %q, want %q", c.id, c.name, c.branch, got, c.want)
 		}
+	}
+}
+
+// TestDisplayLabelWithWorktree 覆盖列出口径的 worktree 归属标记：
+// 主仓名为空（普通仓库）时与 DisplayLabel 完全一致；非空时追加 ` ← 主仓名`。
+func TestDisplayLabelWithWorktree(t *testing.T) {
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	if got := DisplayLabelWithWorktree(2, "wt-a", "feature/x", ""); got != "[2] wt-a (feature/x)" {
+		t.Errorf("非 worktree 标签 = %q, want 不带归属标记", got)
+	}
+	if got := DisplayLabelWithWorktree(2, "wt-a", "feature/x", "主仓"); got != "[2] wt-a (feature/x) ← 主仓" {
+		t.Errorf("worktree 标签 = %q, want %q", got, "[2] wt-a (feature/x) ← 主仓")
+	}
+	if got := WorktreeMark(""); got != "" {
+		t.Errorf("WorktreeMark(\"\") = %q, want empty", got)
+	}
+}
+
+// TestMainRepoName 覆盖主仓展示名反查：登记命中取 Name，查不到取路径 base 名，空路径返回空串。
+func TestMainRepoName(t *testing.T) {
+	repos := []config.Repository{
+		{ID: 1, Path: filepath.Clean("/data/main"), Name: "主仓名"},
+		{ID: 2, Path: filepath.Clean("/data/other"), Name: "other"},
+	}
+	if got := MainRepoName(filepath.Clean("/data/main"), repos); got != "主仓名" {
+		t.Errorf("MainRepoName(登记命中) = %q, want 主仓名", got)
+	}
+	if got := MainRepoName(filepath.Clean("/data/unregistered"), repos); got != "unregistered" {
+		t.Errorf("MainRepoName(未登记) = %q, want 路径 base 名 unregistered", got)
+	}
+	if got := MainRepoName("", repos); got != "" {
+		t.Errorf("MainRepoName(空) = %q, want empty", got)
+	}
+	if got := MainRepoName(filepath.Clean("/data/main"), nil); got != "main" {
+		t.Errorf("MainRepoName(无登记列表) = %q, want base 名 main", got)
+	}
+}
+
+// TestRepoLabels 覆盖 review 提示/结果行共用标签：worktree 带归属标记，普通仓不带。
+func TestRepoLabels(t *testing.T) {
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	all := []config.Repository{
+		{ID: 1, Path: filepath.Clean("/data/main"), Name: "主仓名"},
+		{ID: 2, Path: filepath.Clean("/data/.worktrees/demo/main"), Name: "wt-main"},
+	}
+	infos := []RepositoryInfo{
+		{ID: 2, Path: filepath.Clean("/data/.worktrees/demo/main"), Name: "wt-main", Branch: "feature/x", WorktreeOf: filepath.Clean("/data/main")},
+		{ID: 1, Path: filepath.Clean("/data/main"), Name: "主仓名", Branch: "main"},
+	}
+	got := RepoLabels(infos, all)
+	if got[0] != "[2] wt-main (feature/x) ← 主仓名" {
+		t.Errorf("RepoLabels(worktree) = %q, want %q", got[0], "[2] wt-main (feature/x) ← 主仓名")
+	}
+	if got[1] != "[1] 主仓名 (main)" {
+		t.Errorf("RepoLabels(main) = %q, want %q", got[1], "[1] 主仓名 (main)")
+	}
+}
+
+// TestWorktreeMainNameRealWorktree 用真实 linked worktree 验证运行时归属判定 + 反查主仓名。
+func TestWorktreeMainNameRealWorktree(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "repo-main")
+	gitInit(t, main)
+	gitCommitIn(t, main)
+	wt := filepath.Join(root, ".worktrees", "demo", "wt-main")
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitWorktreeAdd(t, main, wt, "feature/label")
+
+	all := []config.Repository{{ID: 1, Path: main, Name: "登记名"}}
+	if got := WorktreeMainName(wt, all); got != "登记名" {
+		t.Errorf("WorktreeMainName(worktree) = %q, want 登记名", got)
+	}
+	if got := WorktreeMainName(main, all); got != "" {
+		t.Errorf("WorktreeMainName(主仓) = %q, want empty", got)
+	}
+	// 主仓未登记时按主仓路径 base 名兜底。
+	if got := WorktreeMainName(wt, nil); got != "repo-main" {
+		t.Errorf("WorktreeMainName(worktree, 无登记) = %q, want repo-main", got)
+	}
+	if got := DetectWorktreeOf(filepath.Join(root, "not-a-repo")); got != "" {
+		t.Errorf("DetectWorktreeOf(非 git) = %q, want empty", got)
+	}
+}
+
+// TestResolveSelectionWithSets 覆盖 -r 的 set: 段：命中集合、与 ID 混用去重、
+// 集合缺失报错（不静默返回空）、空集合名报错、sets 为 nil（老配置）时报错、成员仓已删则跳过。
+func TestResolveSelectionWithSets(t *testing.T) {
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	repos := []config.Repository{
+		{ID: 1, Name: "repo-backend"},
+		{ID: 2, Name: "repo-frontend"},
+		{ID: 3, Name: "tools"},
+		{ID: 5, Name: "wiki"},
+	}
+	sets := []config.WorktreeSet{
+		{Name: "demo", Branch: "harness/demo", Members: []config.WorktreeMember{
+			{RepoID: 1, Path: `/data/.worktrees/demo/backend`},
+			{RepoID: 5, Path: `/data/.worktrees/demo/wiki`},
+			{RepoID: 99, Path: `/data/.worktrees/demo/gone`}, // 成员仓已被 config remove，选择时跳过
+		}},
+		{Name: "other", Branch: "harness/other", Members: []config.WorktreeMember{{RepoID: 2}}},
+	}
+
+	tests := []struct {
+		name    string
+		raw     string
+		sets    []config.WorktreeSet
+		want    []int
+		wantErr string
+	}{
+		{"集合命中", "set:demo", sets, []int{1, 5}, ""},
+		{"另一集合命中", "set:other", sets, []int{2}, ""},
+		{"与 ID 混用去重", "1,set:demo", sets, []int{1, 5}, ""},
+		{"与区间混用去重", "1-2,set:demo", sets, []int{1, 2, 5}, ""},
+		{"集合不存在", "set:missing", sets, nil, "未找到 worktree 集合：missing"},
+		{"空集合名", "set:", sets, nil, "set: 后的集合名不能为空"},
+		{"老配置无集合（sets 为 nil）", "set:demo", nil, nil, "未找到 worktree 集合：demo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveSelectionWithSets(tt.raw, repos, tt.sets, nil)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ResolveSelectionWithSets(%q) 期望错误 %q，实得 nil", tt.raw, tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Fatalf("ResolveSelectionWithSets(%q) 错误 = %q, want %q", tt.raw, err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveSelectionWithSets(%q) 意外错误: %v", tt.raw, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("ResolveSelectionWithSets(%q) = %d 个仓库，want %d（%v）", tt.raw, len(got), len(tt.want), tt.want)
+			}
+			for i, r := range got {
+				if r.ID != tt.want[i] {
+					t.Errorf("ResolveSelectionWithSets(%q)[%d] = ID %d, want %d", tt.raw, i, r.ID, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestResolveSelectionThinShell 验证旧签名保持可用（manager_test/cmd 既有调用不破）：
+// 传 nil sets 时既有段类型行为不变，set: 段则报错。
+func TestResolveSelectionThinShell(t *testing.T) {
+	repos := []config.Repository{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}}
+	got, err := ResolveSelection("1-2", repos, nil)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("ResolveSelection(1-2) = %v, %v; want 2 repos, nil", got, err)
+	}
+	if _, err := ResolveSelection("set:any", repos, nil); err == nil {
+		t.Error("ResolveSelection 对 set: 段应报错（无集合可查）")
+	}
+}
+
+// TestMemberLabelSingleSource 钉住评审 S-10：成员展示名只有一处口径——
+// 命中登记表取仓库名，未登记或名称为空退回成员路径 Base（三处列出共用本函数）。
+func TestMemberLabelSingleSource(t *testing.T) {
+	byID := IndexByID([]config.Repository{
+		{ID: 3, Name: "repoA@demo", Path: filepath.Join("root", ".worktrees", "demo", "repoA")},
+		{ID: 4, Name: "", Path: filepath.Join("root", ".worktrees", "demo", "repoB")},
+	})
+	if got := MemberLabel(config.WorktreeMember{RepoID: 3, Path: filepath.Join("root", "x", "y")}, byID); got != "repoA@demo" {
+		t.Errorf("命中登记表应取登记名，实得 %q", got)
+	}
+	if got := MemberLabel(config.WorktreeMember{RepoID: 4, Path: filepath.Join("root", "wt", "repoB")}, byID); got != "repoB" {
+		t.Errorf("登记名为空应退回路径 Base，实得 %q", got)
+	}
+	if got := MemberLabel(config.WorktreeMember{RepoID: 99, Path: filepath.Join("root", "wt", "gone")}, byID); got != "gone" {
+		t.Errorf("未登记成员应退回路径 Base，实得 %q", got)
+	}
+	if len(IndexByID(nil)) != 0 {
+		t.Error("IndexByID(nil) 应为空索引")
 	}
 }

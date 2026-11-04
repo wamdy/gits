@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 )
 
 func AddRepository(path string) error {
@@ -66,8 +68,42 @@ func AddRepositoryWithOptions(path string, customName string, customID int) erro
 	return cfg.Save()
 }
 
-func removeRepoByIndex(cfg *Config, index int) error {
+// detachRepoFromWorktreeSets 把该仓库 ID 的成员从所有 worktree 集合连带移出（TQ-01 / AC-03.6），
+// 成员被清空的集合整组删除，不留悬空 RepoID；返回受影响的集合名（按配置顺序，供命令层点名）。
+// 未命中任何集合时不改动 cfg.WorktreeSets（保持 nil 与既有落盘形态不变）。
+func detachRepoFromWorktreeSets(cfg *Config, repoID int) []string {
+	var affected []string
+	kept := make([]WorktreeSet, 0, len(cfg.WorktreeSets))
+	for _, set := range cfg.WorktreeSets {
+		members := make([]WorktreeMember, 0, len(set.Members))
+		hit := false
+		for _, m := range set.Members {
+			if m.RepoID == repoID {
+				hit = true
+				continue
+			}
+			members = append(members, m)
+		}
+		if !hit {
+			kept = append(kept, set)
+			continue
+		}
+		affected = append(affected, set.Name)
+		if len(members) > 0 {
+			set.Members = members
+			kept = append(kept, set)
+		}
+	}
+	if len(affected) > 0 {
+		cfg.WorktreeSets = kept
+	}
+	return affected
+}
+
+// removeRepoByIndex 删除仓库并连带清理 worktree 集合成员；返回受影响的集合名清单。
+func removeRepoByIndex(cfg *Config, index int) ([]string, error) {
 	repo := cfg.Repositories[index]
+	affected := detachRepoFromWorktreeSets(cfg, repo.ID)
 	for _, group := range repo.Groups {
 		if ids, ok := cfg.Groups[group]; ok {
 			cfg.Groups[group] = removeInt(ids, repo.ID)
@@ -77,18 +113,24 @@ func removeRepoByIndex(cfg *Config, index int) error {
 		}
 	}
 	cfg.Repositories = append(cfg.Repositories[:index], cfg.Repositories[index+1:]...)
-	return cfg.Save()
+	return affected, cfg.Save()
 }
 
 func RemoveRepository(path string) error {
+	_, err := RemoveRepositoryAndDetachSets(path)
+	return err
+}
+
+// RemoveRepositoryAndDetachSets 同 RemoveRepository，额外返回被连带清理的集合名（TQ-01 点名用）。
+func RemoveRepositoryAndDetachSets(path string) ([]string, error) {
 	cfg, err := Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for i, repo := range cfg.Repositories {
@@ -97,13 +139,19 @@ func RemoveRepository(path string) error {
 		}
 	}
 
-	return errors.New("repository not found")
+	return nil, errors.New("repository not found")
 }
 
 func RemoveRepositoryByID(id int) error {
+	_, err := RemoveRepositoryByIDAndDetachSets(id)
+	return err
+}
+
+// RemoveRepositoryByIDAndDetachSets 同 RemoveRepositoryByID，额外返回被连带清理的集合名。
+func RemoveRepositoryByIDAndDetachSets(id int) ([]string, error) {
 	cfg, err := Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for i, repo := range cfg.Repositories {
@@ -112,13 +160,19 @@ func RemoveRepositoryByID(id int) error {
 		}
 	}
 
-	return errors.New("repository not found")
+	return nil, errors.New("repository not found")
 }
 
 func RemoveRepositoryByName(name string) error {
+	_, err := RemoveRepositoryByNameAndDetachSets(name)
+	return err
+}
+
+// RemoveRepositoryByNameAndDetachSets 同 RemoveRepositoryByName，额外返回被连带清理的集合名。
+func RemoveRepositoryByNameAndDetachSets(name string) ([]string, error) {
 	cfg, err := Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for i, repo := range cfg.Repositories {
@@ -127,7 +181,7 @@ func RemoveRepositoryByName(name string) error {
 		}
 	}
 
-	return errors.New("repository not found")
+	return nil, errors.New("repository not found")
 }
 
 func AddGroup(name string) error {
@@ -415,6 +469,54 @@ func nameExists(cfg *Config, name string) bool {
 	return false
 }
 
+// EnsureRepositoryEntry 确保 path 在**内存配置**里有对应仓库条目：已存在（按解析后的绝对
+// 路径比对，兼容存量绝对路径与待解析相对路径）则复用并返回「未新建」；否则以 preferredName
+// 追加一条新条目（名称冲突沿用 uniqueRepoName 兜底，ID 沿用 nextRepoID 续号）并返回「已新建」。
+//
+// 只改内存、不落盘：调用方在同一次 Save() 里把仓库条目与 worktree 集合一起写出，避免
+// 「条目已存盘而集合未写」的中间态（区别于 AddRepositoryWithOptions：它自带 Load/Save）。
+// 内存中 Repository.Path 恒为绝对路径（#1056 的读写同源不变量），相对化由 Save 负责。
+func EnsureRepositoryEntry(cfg *Config, path, preferredName string) (Repository, bool, error) {
+	if cfg == nil {
+		return Repository{}, false, errors.New("nil config")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Repository{}, false, err
+	}
+	absPath = filepath.Clean(absPath)
+	for _, r := range cfg.Repositories {
+		if sameResolvedPath(r.Path, absPath) {
+			return r, false, nil
+		}
+	}
+	name := preferredName
+	if name == "" {
+		name = filepath.Base(absPath)
+	}
+	// Groups 初始化与 config add 同形（评审 S-01）：留 nil 会落盘 "groups": null，
+	// 与手工添加条目的 [] 不一致，ReadMe 示例形状也是 []。
+	entry := Repository{
+		ID:     nextRepoID(cfg),
+		Path:   absPath,
+		Name:   uniqueRepoName(cfg, name),
+		Groups: make([]string, 0),
+	}
+	cfg.Repositories = append(cfg.Repositories, entry)
+	return entry, true, nil
+}
+
+// sameResolvedPath 判断配置中已存路径（绝对或相对）与目标绝对路径是否指向同一目录。
+// 相对形态按 ConfigBaseDir 解析后再比；Windows 路径大小写不敏感。
+func sameResolvedPath(have, want string) bool {
+	a := filepath.Clean(ResolvePath(have))
+	b := filepath.Clean(want)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func uniqueRepoName(cfg *Config, name string) string {
 	usedNames := make(map[string]bool)
 	for _, repo := range cfg.Repositories {
@@ -545,6 +647,11 @@ func ReassignRepositoryID(oldID int, newID int) error {
 		}
 	}
 
+	// worktree 集合成员同样按 oldID→newID 回写（评审 BLOCK-1）：成员 RepoID 指向仓库条目，
+	// 若只改 repositories 与 groups，reid 之后 `-r set:` 会静默指向别的条目或查不到，
+	// 再被 config validate 当悬空成员永久删除。
+	remapWorktreeMemberIDs(cfg, map[int]int{oldID: newID})
+
 	return cfg.Save()
 }
 
@@ -576,13 +683,95 @@ func ReassignAllIDs() error {
 		}
 	}
 
+	// 集合成员一并续号（评审 BLOCK-1）：与 Groups 同一张 idMapping，未变更的 ID 不在表里即原样保留。
+	remapWorktreeMemberIDs(cfg, idMapping)
+
 	return cfg.Save()
 }
 
-func ValidateAndClean() (int, int, int, error) {
+// remapWorktreeMemberIDs 按 oldID→newID 映射回写 worktree 集合成员的 RepoID。
+// 映射表里没有的 ID 保持原值；无集合时零改动（幂等，不产生写盘副作用以外的变化）。
+func remapWorktreeMemberIDs(cfg *Config, idMapping map[int]int) {
+	if len(cfg.WorktreeSets) == 0 || len(idMapping) == 0 {
+		return
+	}
+	for i := range cfg.WorktreeSets {
+		for j := range cfg.WorktreeSets[i].Members {
+			if newID, ok := idMapping[cfg.WorktreeSets[i].Members[j].RepoID]; ok {
+				cfg.WorktreeSets[i].Members[j].RepoID = newID
+			}
+		}
+	}
+}
+
+// DropWorktreeMemberRepos 移除「ID 命中给定成员、且解析后路径等于该成员路径」的仓库条目，
+// 返回被移除的条目数（评审 BLOCK-2）。
+//
+// 为什么需要：`worktree add` 会为每个 worktree 目录自动登记仓库条目；若 `remove`/`prune`
+// 只删集合而回收不了条目，那些条目就成了指向已消失目录的死引用——默认全量批量命令每次都要
+// 为它们吐一行 `chdir … cannot find the file specified`，只能靠 config validate 兜。
+// 为什么必须同时比路径：早期/手工编辑的配置里成员可能指向父仓条目，只按 ID 删会把父仓整条抹掉。
+func DropWorktreeMemberRepos(cfg *Config, members []WorktreeMember) int {
+	if cfg == nil || len(members) == 0 || len(cfg.Repositories) == 0 {
+		return 0
+	}
+	want := make(map[int]string, len(members)) // repoID → member 路径
+	for _, m := range members {
+		want[m.RepoID] = m.Path
+	}
+	kept := make([]Repository, 0, len(cfg.Repositories))
+	dropped := 0
+	for _, r := range cfg.Repositories {
+		if mp, ok := want[r.ID]; ok && sameResolvedPath(r.Path, mp) {
+			dropped++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	cfg.Repositories = kept
+	return dropped
+}
+
+// detachDanglingWorktreeMembers 兜底清理：把 worktree 集合里指向「配置中已不存在的仓库 ID」的
+// 悬空成员移出（手工编辑过配置、或历史遗留），集合清空则整组删除；返回被移出的成员数（TQ-01）。
+func detachDanglingWorktreeMembers(cfg *Config) int {
+	if len(cfg.WorktreeSets) == 0 {
+		return 0
+	}
+	existing := make(map[int]bool, len(cfg.Repositories))
+	for _, repo := range cfg.Repositories {
+		existing[repo.ID] = true
+	}
+
+	removed := 0
+	kept := make([]WorktreeSet, 0, len(cfg.WorktreeSets))
+	for _, set := range cfg.WorktreeSets {
+		members := make([]WorktreeMember, 0, len(set.Members))
+		for _, m := range set.Members {
+			if existing[m.RepoID] {
+				members = append(members, m)
+				continue
+			}
+			removed++
+		}
+		if len(members) == 0 {
+			continue
+		}
+		set.Members = members
+		kept = append(kept, set)
+	}
+	if removed > 0 {
+		cfg.WorktreeSets = kept
+	}
+	return removed
+}
+
+// ValidateAndClean 校验并清理配置；返回值依次为：移除的空分组数、移除的无效分组引用数、
+// 移除的缺失仓库数、移除的 worktree 悬空成员数（TQ-01 兜底口径），以及错误。
+func ValidateAndClean() (int, int, int, int, error) {
 	cfg, err := Load()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 
 	repoMap := make(map[int]bool)
@@ -623,14 +812,19 @@ func ValidateAndClean() (int, int, int, error) {
 
 	for i := len(cfg.Repositories) - 1; i >= 0; i-- {
 		if _, err := os.Stat(cfg.Repositories[i].Path); os.IsNotExist(err) {
-			removeRepoByIndex(cfg, i)
+			if _, err := removeRepoByIndex(cfg, i); err != nil {
+				return cleanedGroups, cleanedRefs, missingRepos, 0, err
+			}
 			missingRepos++
 		}
 	}
 
-	if cleanedRefs > 0 || cleanedGroups > 0 || missingRepos > 0 {
-		return cleanedGroups, cleanedRefs, missingRepos, cfg.Save()
+	// 兜底：清理 worktree 集合里的悬空 RepoID 成员（removeRepoByIndex 已处理的路径不重复计数）。
+	cleanedSetMembers := detachDanglingWorktreeMembers(cfg)
+
+	if cleanedRefs > 0 || cleanedGroups > 0 || missingRepos > 0 || cleanedSetMembers > 0 {
+		return cleanedGroups, cleanedRefs, missingRepos, cleanedSetMembers, cfg.Save()
 	}
 
-	return 0, 0, 0, nil
+	return 0, 0, 0, 0, nil
 }

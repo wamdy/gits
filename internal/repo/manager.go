@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -33,18 +35,25 @@ func UnregisterRepositoryByID(id int) error {
 }
 
 func UnregisterRepositoryByRef(ref string) error {
+	_, err := UnregisterRepositoryByRefAndDetachSets(ref)
+	return err
+}
+
+// UnregisterRepositoryByRefAndDetachSets 同 UnregisterRepositoryByRef（repo-ref 优先级不变），
+// 额外返回被连带移出成员的 worktree 集合名，供 `config remove` 点名输出（TQ-01 / AC-03.6）。
+func UnregisterRepositoryByRefAndDetachSets(ref string) ([]string, error) {
 	id, path, _ := config.ParseRepoRef(ref)
 	if id > 0 {
-		return config.RemoveRepositoryByID(id)
+		return config.RemoveRepositoryByIDAndDetachSets(id)
 	}
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if foundID, ok := config.FindRepoByName(cfg, ref); ok {
-		return config.RemoveRepositoryByID(foundID)
+		return config.RemoveRepositoryByIDAndDetachSets(foundID)
 	}
-	return config.RemoveRepository(path)
+	return config.RemoveRepositoryAndDetachSets(path)
 }
 
 func GetRegisteredRepositories() ([]config.Repository, error) {
@@ -76,6 +85,98 @@ func DisplayLabel(id int, name, branch string) string {
 		label += fmt.Sprintf(" (%s)", branch)
 	}
 	return label
+}
+
+// WorktreeMark 渲染 worktree 归属标记（` ← 主仓名`）；mainName 为空（普通仓库）返回空串不加噪。
+// 三处列出（config show / config group show / config scan）与 review 提示、结果行共用这一处拼接，
+// 不在 cmd 层各自拼字符串（AC-03.7）。
+func WorktreeMark(mainName string) string {
+	if mainName == "" {
+		return ""
+	}
+	return i18n.T("worktree_of_mark", mainName)
+}
+
+// IndexByID 把仓库登记表按 ID 索引，供成员展示名反查复用（避免三处各建一次 map）。
+func IndexByID(repos []config.Repository) map[int]config.Repository {
+	byID := make(map[int]config.Repository, len(repos))
+	for _, r := range repos {
+		byID[r.ID] = r
+	}
+	return byID
+}
+
+// MemberLabel 给出 worktree 集合成员的展示名：优先取登记仓库名，未登记或名称为空时
+// 退回成员路径的 Base。三处列出（worktree list / config show 的集合节 / remove·prune
+// 的成员预览）共用本函数（评审 S-10），延续 AC-03.7「不得各自实现一套口径」的初衷。
+func MemberLabel(m config.WorktreeMember, byID map[int]config.Repository) string {
+	if r, ok := byID[m.RepoID]; ok && r.Name != "" {
+		return r.Name
+	}
+	return filepath.Base(m.Path)
+}
+
+// DisplayLabelWithWorktree 完整列出口径：`[ID] 名称 (分支) ← 主仓名`。
+// mainName 为空时退化为 DisplayLabel（普通仓库形态不变）。
+func DisplayLabelWithWorktree(id int, name, branch, mainName string) string {
+	return DisplayLabel(id, name, branch) + WorktreeMark(mainName)
+}
+
+// DetectWorktreeOf 运行时判定该路径是否为 linked worktree，是则返回所属主仓路径，
+// 否则返回空串（普通仓库 / submodule / 非 git）。worktree 身份不落配置，始终取自 git 事实。
+func DetectWorktreeOf(path string) string {
+	if path == "" || git.Classify(path) != git.KindLinkedWorktree {
+		return ""
+	}
+	return git.MainRepoPath(path)
+}
+
+// MainRepoName 反查主仓展示名：在已登记仓库中按路径命中取其 Name，
+// 查不到（主仓未登记/分组列表不完整）则退回主仓路径的 base 名；mainPath 为空返回空串。
+func MainRepoName(mainPath string, repos []config.Repository) string {
+	if mainPath == "" {
+		return ""
+	}
+	target := filepath.Clean(filepath.FromSlash(mainPath))
+	for _, r := range repos {
+		if r.Path == "" || r.Name == "" {
+			continue
+		}
+		if sameDir(r.Path, target) {
+			return r.Name
+		}
+	}
+	return filepath.Base(target)
+}
+
+// WorktreeMainName 组合入口：运行时判定 + 反查主仓展示名（供只有路径的列出场景使用）。
+func WorktreeMainName(path string, repos []config.Repository) string {
+	return MainRepoName(DetectWorktreeOf(path), repos)
+}
+
+// RepoLabels 生成一组仓库的回显标签（review 提示 / 逐仓结果行 / scan 候选共用口径）：
+// `[ID] 名称 (分支) ← 主仓名`；分支为空时现取，主仓名在 allRepos 中反查（可为 nil）。
+func RepoLabels(infos []RepositoryInfo, allRepos []config.Repository) []string {
+	labels := make([]string, len(infos))
+	for i, r := range infos {
+		branch := r.Branch
+		if branch == "" {
+			branch = git.GetBranchName(r.Path)
+		}
+		labels[i] = DisplayLabelWithWorktree(r.ID, r.Name, DisplayBranch(branch, r.Path),
+			MainRepoName(r.WorktreeOf, allRepos))
+	}
+	return labels
+}
+
+// sameDir 比较两个目录路径是否同一目录（分隔符归一；Windows 路径大小写不敏感）。
+func sameDir(a, b string) bool {
+	a = filepath.Clean(filepath.FromSlash(a))
+	b = filepath.Clean(filepath.FromSlash(b))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // GetRepositoryBranches 串行为每个仓库填充运行时 Branch 字段（供 config show / config group show 打印）。
@@ -194,7 +295,16 @@ func FindReposByBranch(pattern string, repos []config.Repository, checker Branch
 
 // ResolveSelection 解析 -r 选择值（逗号分段），支持 ID / ID 区间 / 名称通配 / 名称精确 /
 // branch: 段混合，结果按仓库 ID 去重。0 匹配时返回空切片与 nil 错误。
+// 保留为 ResolveSelectionWithSets 的薄壳（不破坏既有调用方与单测签名）。
 func ResolveSelection(raw string, repos []config.Repository, branchChecker BranchChecker) ([]config.Repository, error) {
+	return ResolveSelectionWithSets(raw, repos, nil, branchChecker)
+}
+
+// ResolveSelectionWithSets 在 ResolveSelection 的段类型之上追加 `set:<集合名>` 段：
+// 命中 worktree 集合 → 按 Members[].RepoID 收集（仓库已不存在则跳过该成员），沿用 seen 按 ID 去重；
+// 集合名为空或不存在 → 返回 error（不静默返回空，AC-03.1）。
+// sets 为 nil（老配置/旧调用方）时，任何 set: 段都按「集合不存在」报错。
+func ResolveSelectionWithSets(raw string, repos []config.Repository, sets []config.WorktreeSet, branchChecker BranchChecker) ([]config.Repository, error) {
 	seen := map[int]bool{}
 	var result []config.Repository
 	for _, seg := range strings.Split(raw, ",") {
@@ -228,6 +338,21 @@ func ResolveSelection(raw string, repos []config.Repository, branchChecker Branc
 			}
 			for _, r := range matched {
 				if !seen[r.ID] {
+					seen[r.ID] = true
+					result = append(result, r)
+				}
+			}
+		case strings.HasPrefix(seg, "set:"): // 按 worktree 集合成员选择
+			name := strings.TrimPrefix(seg, "set:")
+			if name == "" {
+				return nil, errors.New(i18n.T("set_name_empty"))
+			}
+			set, ok := findSetByName(sets, name)
+			if !ok {
+				return nil, errors.New(i18n.T("set_not_found", name))
+			}
+			for _, m := range set.Members {
+				if r, ok := findByID(repos, m.RepoID); ok && !seen[r.ID] {
 					seen[r.ID] = true
 					result = append(result, r)
 				}
@@ -297,4 +422,14 @@ func findByName(repos []config.Repository, name string) (config.Repository, bool
 		}
 	}
 	return config.Repository{}, false
+}
+
+// findSetByName 按集合名精确命中 worktree 集合（集合名不做通配/大小写变体）。
+func findSetByName(sets []config.WorktreeSet, name string) (config.WorktreeSet, bool) {
+	for _, s := range sets {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return config.WorktreeSet{}, false
 }

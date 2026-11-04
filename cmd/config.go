@@ -43,15 +43,19 @@ var configAddCmd = &cobra.Command{
 var configRemoveCmd = &cobra.Command{
 	Use:   "remove <repo-ref>",
 	Short: "Remove repository",
-	Long:  "Remove a repository from the management list by ID, name, or path.",
+	Long:  "Remove a repository from the management list by ID, name, or path. Worktree set members pointing at the repository are detached as well.",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		err := repo.UnregisterRepositoryByRef(args[0])
+		// 删仓连带把该成员从所有 worktree 集合移出，集合清空则删除集合（TQ-01 / AC-03.6）。
+		affected, err := repo.UnregisterRepositoryByRefAndDetachSets(args[0])
 		if err != nil {
 			ui.PrintError(err)
 			return
 		}
 		ui.PrintSuccess("Repository removed successfully")
+		if len(affected) > 0 {
+			ui.PrintMessage(i18n.T("config_remove_sets_hit", len(affected), strings.Join(affected, ", ")))
+		}
 	},
 }
 
@@ -77,6 +81,8 @@ var configShowCmd = &cobra.Command{
 		repos := repo.GetRepositoryBranches(cfg.Repositories)
 		ui.PrintRegisteredRepositories(repos)
 		ui.PrintConfigSettings(cfg)
+		// worktree 集合块紧跟配置项之后；无集合时整块不输出。
+		ui.PrintWorktreeSets(cfg.WorktreeSets, repos)
 		ui.PrintConfigPath(config.GetConfigPath())
 	},
 }
@@ -259,7 +265,13 @@ var configGroupShowCmd = &cobra.Command{
 				return
 			}
 			repos = repo.GetRepositoryBranches(repos)
-			ui.PrintGroupDetails(args[0], repos)
+			// 全量登记表一并传入：worktree 归属反查主仓条目，主仓通常不在被看的组里（评审 Q-01）。
+			allRepos, err := repo.GetRegisteredRepositories()
+			if err != nil {
+				ui.PrintError(err)
+				return
+			}
+			ui.PrintGroupDetails(args[0], repos, allRepos)
 		}
 	},
 }
@@ -300,24 +312,9 @@ var configScanCmd = &cobra.Command{
 		var newRepos []repo.RepositoryInfo
 		fmt.Print(i18n.T("found_repos", len(discovered)) + ":\n\n")
 		for i, r := range discovered {
-			status := i18n.T("new")
-			statusColor := ui.ColorReset
-			nameColor := ui.ColorBlue
-			// 已注册仓库附配置 ID（`#i+1` 是本次 scan 的待选择序号，与配置 ID 不同源，样式须区分）
-			idPrefix := ""
-			if id, ok := registeredIDs[r.Path]; ok {
-				status = i18n.T("registered")
-				statusColor = ui.ColorGreen
-				nameColor = ui.ColorReset
-				idPrefix = fmt.Sprintf("%s[%d]%s ", ui.ColorCyan, id, ui.ColorReset)
-			}
-			fmt.Printf("  %s#%d%s %s%s%s%s (%s) %s%s%s %s[%s]%s\n",
-				ui.ColorYellow, i+1, ui.ColorReset,
-				idPrefix,
-				nameColor, r.Name, ui.ColorReset,
-				r.Path,
-				ui.ColorPurple, repo.DisplayBranch(r.Branch, r.Path), ui.ColorReset,
-				statusColor, status, ui.ColorReset)
+			// 列出交由 ui 统一口径：分支展示值与 worktree 归属标记（← 主仓）
+			// 与 config show / group show / review 提示共用同一套函数，cmd 层不拼字符串。
+			ui.PrintScanCandidate(i, r, registeredIDs[r.Path], registered)
 			if _, ok := registeredIDs[r.Path]; !ok {
 				newRepos = append(newRepos, r)
 			}
@@ -435,19 +432,23 @@ var configValidateCmd = &cobra.Command{
 	Short: "Validate and clean configuration",
 	Long:  "Check configuration for invalid group references and clean them up.",
 	Run: func(cmd *cobra.Command, args []string) {
-		cleanedGroups, cleanedRefs, missingRepos, err := config.ValidateAndClean()
+		// 最后一项是被兜底清理的 worktree 悬空成员数（TQ-01 的补偿路径）。
+		cleanedGroups, cleanedRefs, missingRepos, cleanedSetMembers, err := config.ValidateAndClean()
 		if err != nil {
 			ui.PrintError(err)
 			return
 		}
-		if cleanedGroups == 0 && cleanedRefs == 0 && missingRepos == 0 {
+		if cleanedGroups == 0 && cleanedRefs == 0 && missingRepos == 0 && cleanedSetMembers == 0 {
 			ui.PrintSuccess(i18n.T("config_valid"))
-		} else {
-			ui.PrintSuccess(fmt.Sprintf("%s: %d %s, %d %s, %d %s",
-				i18n.T("config_cleaned"),
-				cleanedGroups, i18n.T("empty_groups_removed"),
-				cleanedRefs, i18n.T("invalid_refs_removed"),
-				missingRepos, i18n.T("missing_repos_removed")))
+			return
+		}
+		ui.PrintSuccess(fmt.Sprintf("%s: %d %s, %d %s, %d %s",
+			i18n.T("config_cleaned"),
+			cleanedGroups, i18n.T("empty_groups_removed"),
+			cleanedRefs, i18n.T("invalid_refs_removed"),
+			missingRepos, i18n.T("missing_repos_removed")))
+		if cleanedSetMembers > 0 {
+			ui.PrintMessage(fmt.Sprintf("%d %s", cleanedSetMembers, i18n.T("set_members_removed")))
 		}
 	},
 }
