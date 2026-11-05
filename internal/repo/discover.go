@@ -50,6 +50,11 @@ func isNoiseDir(name string) bool {
 // 命中后由有界 worker pool 并发采集 branch/status，并对 gitfile 形态做三态判定
 // （submodule 按 Q5 跳过、不进候选也不报错；linked worktree 记录所属主仓路径）。
 // 扫描根本身若是 Git 仓库，同样纳入发现结果（与扫描其下子仓库一视同仁）。
+//
+// 并发编排的硬约束（#1070）：遍历与结果消费必须**同时**推进。旧实现把遍历放在调用协程、
+// 结果只在遍历结束后才收，于是「worker 写满 results 缓冲区 → 不再读 found；遍历写满 found
+// 缓冲区 → 无人读」形成环形互堵，候选数越过两通道容量之和（64+64≈136）即触发
+// `fatal error: all goroutines are asleep - deadlock`（exit 2、零业务输出）。
 func Discover(path string) ([]RepositoryInfo, error) {
 	found := make(chan discoveryTarget, 64) // 发现的候选仓库
 	results := make(chan RepositoryInfo, 64)
@@ -85,35 +90,40 @@ func Discover(path string) ([]RepositoryInfo, error) {
 		close(results)
 	}()
 
-	walkErr := filepath.Walk(path, func(currentPath string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.Name() != ".git" {
-			if info.IsDir() && isNoiseDir(info.Name()) {
-				return filepath.SkipDir
+	walkDone := make(chan error, 1)
+	go func() { // 遍历协程：写完候选即关闭 found，唤醒 worker 收尾
+		walkErr := filepath.Walk(path, func(currentPath string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
 			}
-			return nil
-		}
-		// `.git` 命中：目录 → 普通仓；文件 → worktree / submodule（由 worker 细分）。
-		repoPath := filepath.Dir(currentPath)
-		absRepoPath, err := filepath.Abs(repoPath)
-		if err != nil {
-			return err
-		}
-		found <- discoveryTarget{path: absRepoPath, gitIsFile: !info.IsDir()}
-		// 命中即跳过该仓库目录的剩余条目（含 .git 文件场景下的兄弟子目录），
-		// 与修复前对 `.git` 目录 SkipDir 的语义保持一致。
-		return filepath.SkipDir
-	})
-	close(found)
+			if info.Name() != ".git" {
+				if info.IsDir() && isNoiseDir(info.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			// `.git` 命中：目录 → 普通仓；文件 → worktree / submodule（由 worker 细分）。
+			repoPath := filepath.Dir(currentPath)
+			absRepoPath, err := filepath.Abs(repoPath)
+			if err != nil {
+				return err
+			}
+			found <- discoveryTarget{path: absRepoPath, gitIsFile: !info.IsDir()}
+			// 命中即跳过该仓库目录的剩余条目（含 .git 文件场景下的兄弟子目录），
+			// 与修复前对 `.git` 目录 SkipDir 的语义保持一致。
+			return filepath.SkipDir
+		})
+		close(found)
+		walkDone <- walkErr
+	}()
 
+	// 调用协程专职消费结果：遍历与消费并行，才不存在「双方各持一个满缓冲」的互堵闭环。
 	var repos []RepositoryInfo
 	for r := range results {
 		repos = append(repos, r)
 	}
 
-	if walkErr != nil {
+	if walkErr := <-walkDone; walkErr != nil {
 		return nil, walkErr
 	}
 	return repos, nil
