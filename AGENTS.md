@@ -21,7 +21,7 @@
 | `internal/config/manager.go` | 配置操作：仓库增删改查、分组管理、repo-ref 解析（ID/名称/路径）、ID 重排、校验清理；worktree 集合连带清理（`detachRepoFromWorktreeSets`/`detachDanglingWorktreeMembers`） |
 | `internal/git/executor.go` | git 命令执行封装（`exec.Command("git", ...)`）、`ExecutionResult`、branch/status/is-git 快捷方法、`BranchExists`（分支存在检查）、**worktree 三态判定底座**（`GitDirs`/`Classify`/`MainRepoPath` + `GitEntryKind`）、`WorktreeAdd`/`WorktreeRemove` |
 | `internal/i18n/i18n.go` | 中/英双语字典，`i18n.T(key, args...)` 取文案 |
-| `internal/repo/discover.go` | 仓库发现：`Discover()` 目录遍历找 `.git`（跳过 9 种噪音目录）+ 8-worker pool 并发采集 branch/status；`GetRepositoryInfo` |
+| `internal/repo/discover.go` | 仓库发现：`Discover()` 目录遍历找 `.git`（跳过 9 种噪音目录）+ 8-worker pool 并发采集 branch/status；**遍历协程与调用协程的结果消费循环必须并行推进**——`found`/`results` 各带 64 缓冲，若遍历在调用协程内同步跑完才收结果，worker 写满 `results` 即不再读 `found`、遍历写满 `found` 即无人读，候选数越过 64+64+8≈136 触发 `all goroutines are asleep - deadlock`（#1070，回归钉 `TestDiscoverManyCandidatesNoDeadlock`）；`GetRepositoryInfo` |
 | `internal/repo/manager.go` | 仓库管理门面（转发到 config 包）+ `ResolveSelectionWithSets`（ID/区间/通配/名称/`branch:`/`set:` 选择，`ResolveSelection` 为薄壳）+ 列出口径 `DisplayBranch`/`DisplayLabel`/`DisplayLabelWithWorktree`/`RepoLabels`/`WorktreeMark`/`WorktreeMainName` |
 | `internal/ui/printer.go` | 输出格式化：表格、分组、review 提示、config show 配置项/默认值块与 worktree 集合块、`worktree list` 明细、worktree add/remove 确认、**ANSI 颜色**（`ColorMode` 变量，`InitColorMode` 按终端能力置 ANSI 或空串） |
 | `internal/ui/isvt_windows.go` / `isvt_other.go` | 平台差异的 `supportsVT()`：Windows 查 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`；其余平台恒 true |

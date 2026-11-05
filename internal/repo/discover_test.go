@@ -1,12 +1,14 @@
 package repo
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gitInit 在指定路径初始化一个空 Git 仓库。
@@ -306,6 +308,58 @@ func TestDiscoverWorktreeAndSubmoduleMixed(t *testing.T) {
 				t.Errorf("repo-main WorktreeOf = %q, want empty", r.WorktreeOf)
 			}
 		}
+	}
+}
+
+// TestDiscoverManyCandidatesNoDeadlock 回归 #1070：候选数越过两个通道容量之和
+// （found 64 + results 64 + 8 个在途 worker ≈ 136）时，遍历与结果消费必须并行推进。
+// 旧实现把遍历放在调用协程、结果只在遍历结束后才收，此处会以
+// `fatal error: all goroutines are asleep - deadlock` 崩溃（exit 2、零业务输出）。
+func TestDiscoverManyCandidatesNoDeadlock(t *testing.T) {
+	const candidates = 200 // 明确高于 136 的触发水位
+	root := t.TempDir()
+	// 只造 `.git` 目录占位、不跑 git init：本用例验证的是协程编排，不是采集结果，
+	// 采集函数对非法仓库返回空串，不影响候选计数与判据。
+	for i := 0; i < candidates; i++ {
+		gitDir := filepath.Join(root, fmt.Sprintf("r%03d", i), ".git")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", gitDir, err)
+		}
+	}
+
+	type outcome struct {
+		repos []RepositoryInfo
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		repos, err := Discover(root)
+		done <- outcome{repos: repos, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Discover(%s) = _, %v", root, got.err)
+		}
+		if len(got.repos) != candidates {
+			t.Fatalf("discovered = %d 条, want %d 条（候选不得丢失）", len(got.repos), candidates)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("Discover 在 %d 个候选上超时未返回：遍历与结果消费互堵（#1070 回归）", candidates)
+	}
+}
+
+// TestDiscoverPropagatesWalkError 验证并发化之后遍历错误仍然上抛（#1070 AC-4）：
+// walkErr 经 walkDone 单值通道回传，不存在「协程把错误吞掉、调用方拿到空结果当成功」的形态。
+func TestDiscoverPropagatesWalkError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	repos, err := Discover(missing)
+	if err == nil {
+		t.Fatalf("Discover(%s) = %d 条, nil；遍历错误未上抛", missing, len(repos))
+	}
+	if repos != nil {
+		t.Errorf("Discover(%s) 出错时 repos = %v, want nil", missing, repos)
 	}
 }
 
