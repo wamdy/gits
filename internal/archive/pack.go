@@ -415,7 +415,7 @@ func walk(spec RepoSpec, opts Options, out emit) (Stats, error) {
 		}
 		// 4) 只收常规文件（TQ-06 / AC-06.5）：link / socket / fifo / device 跳过并计数。
 		//    不跟随、不解引用——跟随会翻倍体积并可能成环（node_modules 式链接、worktree 互指）。
-		if !info.Mode().IsRegular() {
+		if !isPackedFileMode(info.Mode()) {
 			st.LinkSkipped++
 			return nil
 		}
@@ -499,6 +499,13 @@ func writeFileEntry(w *zip.Writer, entryName, diskPath string, mode fs.FileMode)
 		return fmt.Errorf("copy entry %s: %w", entryName, err)
 	}
 	return nil
+}
+
+// isPackedFileMode 是"这条内容是否进包"的唯一判据：只有常规文件进包。
+// 抽成函数不是为了复用，而是让 symlink/socket/fifo/device 的排除语义在 Windows
+// 无法建符号链接的环境里仍然可被单测钉住（真实 link 用例在那种环境只能 skip）。
+func isPackedFileMode(mode fs.FileMode) bool {
+	return mode.IsRegular()
 }
 
 func cleanedPathSet(paths []string) map[string]bool {

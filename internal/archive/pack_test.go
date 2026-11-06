@@ -358,6 +358,31 @@ func TestSelfExclusionIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestOnlyRegularFileModesArePacked(t *testing.T) {
+	// Windows 无符号链接权限时上面的真实 link 用例只能 skip；这条把同一个判据
+	// （isPackedFileMode，walk 实际用的那个）按模式位钉死，门不因环境而失效。
+	cases := []struct {
+		name string
+		mode fs.FileMode
+		want bool
+	}{
+		{"regular", 0, true},
+		{"regular+exec", 0o755, true},
+		{"dir", fs.ModeDir | 0o755, false},
+		{"symlink", fs.ModeSymlink, false},
+		{"junction-as-symlink", fs.ModeSymlink | 0o755, false},
+		{"socket", fs.ModeSocket, false},
+		{"fifo", fs.ModeNamedPipe, false},
+		{"device", fs.ModeDevice, false},
+		{"chardev", fs.ModeDevice | fs.ModeCharDevice, false},
+	}
+	for _, c := range cases {
+		if got := isPackedFileMode(c.mode); got != c.want {
+			t.Errorf("isPackedFileMode(%s=%v) = %v, want %v", c.name, c.mode, got, c.want)
+		}
+	}
+}
+
 func TestNonRegularFilesSkipped(t *testing.T) {
 	root := makeRepo(t, "repoA", true, "a.txt:A")
 	link := filepath.Join(root, "link-to-a")
