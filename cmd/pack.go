@@ -289,8 +289,9 @@ func coverAllowed(target string, overwrite, yes, stdinTTY bool, ask func(string,
 		if errors.Is(statErr, fs.ErrNotExist) {
 			return true, false, nil // 不存在 → 直接写
 		}
-		// 取不到信息（权限、被占用）不当作"不存在"放行：交给写入期报错处理，
-		// 避免"预检以为不存在 → Create 撞上去"的假绿路径。
+		// 取不到信息（权限、被占用）**按"继续写入"处理**，不是"当作不存在"：
+		// 最坏结果是写完 `.tmp` 后 `os.Rename` 失败 → abort 删 tmp，不会静默盖掉既有备份，
+		// 代价只是白跑一趟 I/O。在此处提前报错反而要猜平台相关的 stat 错误分类。
 		return true, false, nil
 	}
 	if overwrite || yes {
@@ -303,6 +304,15 @@ func coverAllowed(target string, overwrite, yes, stdinTTY bool, ask func(string,
 		return false, true, nil // 用户主动跳过：不是失败
 	}
 	return false, false, errors.New(i18n.T("pack_cover_non_tty", target))
+}
+
+// shouldWarnPointerGit 决定要不要打「这仓的 .git 只是 gitdir 指针」提示（AC-03.6）。
+// 判据是"这次有没有把 .git 装进包"：全量与 --git-only 都装了，必须提示；
+// --no-git 根本没装，提示就是噪音。写成纯函数是为了让三种模式各钉一条用例——
+// 埋在 writePackArchive 的 if 里时，只有 --git-only 一条路径被实机碰到过，
+// 默认（全量）形态反而静默。
+func shouldWarnPointerGit(mode archive.Mode, pointerGit bool) bool {
+	return pointerGit && mode != archive.ModeNoGit
 }
 
 // ------------------------------------------------------------------ 主流程
@@ -324,7 +334,24 @@ func runPack(cmd *cobra.Command, args []string) {
 	}
 
 	if plan.dryRun {
-		exitOnError(runPackDryRun(plan))
+		// exitOnError 是无条件的失败出口（打印 + os.Exit(1)），不能拿它直接包一个可能为 nil
+		// 的返回值——那样 dry-run 每次都报「错误: <nil>」并退 1（实机验证抓到）。
+		// 守卫已下沉到 exitOnError 本身，这里仍按显式判空写，意图更清楚。
+		if err := runPackDryRun(plan); err != nil {
+			exitOnError(err)
+		}
+		return
+	}
+
+	// 覆盖裁决必须走在 review 之前。
+	// 反例（实机复现）：目标已存在 + 未给 -y/--overwrite + stdin 是管道 → 先撞 review 提示，
+	// fmt.Scanln 读到 EOF 被当成"取消"，打一行「操作已取消」**退出码 0**，
+	// coverAllowed 里那条 AC-06.1 要求的非 TTY `[FAIL]` 永远走不到——
+	// 备份脚本据此认为"这次也备份成功了"。这里先只做只读 stat，命中即非零退出。
+	if !GetYes() && !packOverwrite && !ui.StdinIsTerminal() {
+		if _, err := os.Stat(plan.target); err == nil {
+			exitOnError(errors.New(i18n.T("pack_cover_non_tty", plan.target)))
+		}
 	}
 
 	if !GetYes() && !ui.PrintPackReview(plan.labels, plan.mode, plan.target, plan.matcher.Patterns()) {
@@ -391,6 +418,10 @@ func runPackDryRun(plan packPlan) error {
 
 // writePackArchive 串行写单个 zip：临时文件写满再 rename（AC-04.7，沿 config.Save 的原子写口径）。
 // 返回 (成功仓数, 失败仓数, 致命错误文案)；致命错误非空时磁盘上不留下任何半成品包。
+// 失败仓数在当前整包作废策略下恒为 0（不存在「这仓失败但仍继续写」的分支），
+// 保留是为了不改 `N failed, N succeeded` 的既有打印口径。
+// 单条 entry 打不开按 AC-06.3 只计数、该仓仍算成功，因此**不影响退出码**（AC-06.7），
+// 但收尾必须补一行 incomplete 提示——否则「3 条读不到」的包和完美包在汇总行上长得一模一样。
 func writePackArchive(plan packPlan) (int, int, string) {
 	tmp := plan.target + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(plan.target), 0o755); err != nil {
@@ -413,6 +444,7 @@ func writePackArchive(plan packPlan) (int, int, string) {
 	}
 
 	succeeded, failed := 0, 0
+	incompleteRepos, incompleteEntries := 0, 0
 	for _, e := range plan.entries {
 		rec := archive.RepoRecord{
 			ID: e.spec.ID, Name: e.spec.Name, SourcePath: e.spec.Path,
@@ -433,11 +465,22 @@ func writePackArchive(plan packPlan) (int, int, string) {
 		rec.OK = true
 		mani.AddRecord(rec)
 		ui.PrintPackResultRow(e.label, st, true, "")
-		if e.pointerGit && plan.mode == archive.ModeGitOnly {
+		if st.Failed > 0 {
+			incompleteRepos++
+			incompleteEntries += st.Failed
+		}
+		if shouldWarnPointerGit(plan.mode, e.pointerGit) {
 			// AC-03.6：原样压 worktree 的限制必须可见，但不阻断（Q4 裁决）。
+			// 判据是「这次到底有没有把 .git 装进去」——全量模式同样装了那个指针文件，
+			// 只在 --git-only 下提示会让默认形态的用户解包后才发现包不可独立恢复。
 			ui.PrintMessage(i18n.T("pack_worktree_pointer_note", e.label))
 		}
 		succeeded++
+	}
+
+	// 有条目没进包时补一行收尾提示（不影响退出码，见函数头 AC-06.3/06.7 的口径）。
+	if incompleteRepos > 0 {
+		ui.PrintMessage(i18n.T("pack_incomplete_note", incompleteRepos, incompleteEntries))
 	}
 
 	if err := mani.WriteTo(w); err != nil {

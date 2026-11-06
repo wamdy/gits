@@ -494,9 +494,18 @@ func writeFileEntry(w *zip.Writer, entryName, diskPath string, mode fs.FileMode)
 	if err != nil {
 		return fmt.Errorf("create entry %s: %w", entryName, err)
 	}
-	if _, err := io.Copy(zw, f); err != nil {
+	n, err := io.Copy(zw, f)
+	if err != nil {
 		// entry 已建立却内容不完整：必须整包作废，不能留半条 entry 冒充备份。
 		return fmt.Errorf("copy entry %s: %w", entryName, err)
+	}
+	// io.Copy 只读到 EOF，**不会因为源文件被并发截短而报错**（打包活动仓库时
+	// .git/index、objects 正在被 git gc/commit 改写就是这一类）。标准库的 Close 也不报错，
+	// 结果是包里躺一条合法但比源文件短的 entry——事后无从分辨。
+	// 判据取 Stat 声明值与实际落包字节数：不等即视同写失败，整包作废（AC-06.2 同一取向，
+	// 而不是 AC-06.3 的"打开失败可容忍"——那条说的是内容根本没进包的情况）。
+	if want := info.Size(); n != want {
+		return fmt.Errorf("copy entry %s: wrote %d bytes, source declares %d (truncated)", entryName, n, want)
 	}
 	return nil
 }

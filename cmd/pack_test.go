@@ -85,10 +85,10 @@ func TestPackModeOfRejectsMutualExclusion(t *testing.T) {
 
 func TestOutIsDirFormSingleRule(t *testing.T) {
 	cases := []struct {
-		out      string
-		exists   bool
-		wantDir  bool
-		remark   string
+		out     string
+		exists  bool
+		wantDir bool
+		remark  string
 	}{
 		{"", false, true, "缺省即目录（cwd）"},
 		{"bk", false, false, "不存在且不以分隔符结尾 → 文件形态（AC-04.2 的易踩点）"},
@@ -509,7 +509,39 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// TestShouldWarnPointerGitAcrossModes 钉住 worktree 指针提示的三态：
+// 全量与 --git-only 都把 .git 装进了包 → 必须提示；--no-git 没装 → 不许提示。
+// 原实现只在 --git-only 提示，默认（全量）形态解包后才发现包不可独立恢复。
+func TestShouldWarnPointerGitAcrossModes(t *testing.T) {
+	cases := []struct {
+		mode       archive.Mode
+		pointerGit bool
+		want       bool
+		remark     string
+	}{
+		{archive.ModeFull, true, true, "全量装了 .git"},
+		{archive.ModeGitOnly, true, true, "只压 .git"},
+		{archive.ModeNoGit, true, false, "没装 .git，提示是噪音"},
+		{archive.ModeFull, false, false, "普通仓不提示"},
+		{archive.ModeGitOnly, false, false, "普通仓不提示"},
+	}
+	for _, c := range cases {
+		if got := shouldWarnPointerGit(c.mode, c.pointerGit); got != c.want {
+			t.Errorf("shouldWarnPointerGit(%v,%v) = %v, want %v（%s）", c.mode, c.pointerGit, got, c.want, c.remark)
+		}
+	}
+}
+
 // ------------------------------------------------------------------ flag 契约
+
+// TestExitOnErrorIgnoresNil 钉住 exitOnError 的 nil 守卫。
+// 本用例的价值在于「它能跑完」：exitOnError(nil) 若仍按旧写法无条件 os.Exit(1)，
+// 测试进程会当场以退出码 1 死掉（表现为整包 FAIL），而不是断言失败。
+// 起因是实机验证抓到 `gits pack --dry-run` 每次都报「错误: <nil>」并退 1，
+// 单测全绿而命令恒失败——dry-run 的返回值被直接喂给了当时无条件的 exitOnError。
+func TestExitOnErrorIgnoresNil(t *testing.T) {
+	exitOnError(nil)
+}
 
 func TestPackRejectsStrayArgs(t *testing.T) {
 	// AC-01.7：`gits pack bogus` 不能被当成 git 参数透传，也不能静默打 help 退 0

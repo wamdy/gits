@@ -40,7 +40,9 @@ func HumanBytes(n int64) string {
 func PrintPackReview(labels []string, mode archive.Mode, target string, excludes []string) bool {
 	fmt.Printf("\n%s%s:%s\n", ColorYellow, i18n.T("review_before_exec"), ColorReset)
 	fmt.Printf("%s: %sgits pack [%s]%s\n", i18n.T("command"), ColorCyan, mode.String(), ColorReset)
-	fmt.Printf("%s: %s\n", i18n.T("flag_pack_out"), target)
+	// 标签用专门的文案键：`flag_pack_out` 是 --help 里的选项说明（一整句），
+	// 当行首标签打出来是「输出目录或具体 zip 文件路径（缺省为…）: C:\...zip」这种畸形行。
+	fmt.Printf("%s: %s\n", i18n.T("pack_target_label"), target)
 	if len(excludes) > 0 {
 		fmt.Printf("%s: %s\n", "--exclude", strings.Join(excludes, ", "))
 	}
@@ -48,7 +50,9 @@ func PrintPackReview(labels []string, mode archive.Mode, target string, excludes
 	for _, name := range labels {
 		fmt.Printf("  - %s%s%s\n", ColorBlue, name, ColorReset)
 	}
-	fmt.Printf("\n%s%s? [y/N]:%s ", ColorYellow, i18n.T("proceed_prompt"), ColorReset)
+	// proceed_prompt 文案自带问号，这里不能再补一个 `?`（printer.go 的 printWorktreeReview
+	// 已修过一次，复制 printReviewPrompt 旧变体时又踩了：实机输出「是否继续？? [y/N]」）。
+	fmt.Printf("\n%s%s [y/N]:%s ", ColorYellow, i18n.T("proceed_prompt"), ColorReset)
 
 	var response string
 	fmt.Scanln(&response)
@@ -74,7 +78,8 @@ func yesAnswer(response string) bool {
 }
 
 // PrintPackResultRow 打印单仓结果行：`[OK] label：N 个文件，X MiB（细节计数）`。
-// 计数为 0 的细节项不占位，避免正常路径被四个零刷屏；非零项一定显式（AC-05.2）。
+// 细节行的口径：**四项全为 0 时整行不打印**（正常路径不刷屏）；任一项非零则四项一并列出，
+// 不做逐项裁剪——同一批仓的各行列宽一致、可直接横向对比（AC-05.2 只要求可见披露，未要求省略零项）。
 func PrintPackResultRow(label string, st archive.Stats, ok bool, errText string) {
 	if !ok {
 		fmt.Printf("[%s%s%s] %s%s%s: %s\n", ColorRed, i18n.T("fail"), ColorReset,
