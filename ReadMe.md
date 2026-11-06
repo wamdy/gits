@@ -13,6 +13,7 @@ Git 原生仅支持单一仓库操作，在微服务架构下，一个项目往�
 - 支持仓库分组管理
 - 提供批量操作能力
 - 支持配置持久化
+- 支持按仓库批量压缩打包（可选只压 `.git` 或排除 `.git`，包内结构与仓库同构）
 - **执行前 review 确认（可跳过）**
 
 ---
@@ -54,7 +55,7 @@ gits [全局选项] <子命令> [子命令选项] [参数]
 | `-h, --help` | 显示帮助信息 |
 | `-g, --group <name>` | 对指定分组执行命令 |
 | `-p, --parallel` | 并行执行模式 |
-| `-y, --yes` | **跳过执行前确认** |
+| `-y, --yes` | **跳过执行前确认**（对 `pack` 还包含「目标包已存在，是否覆盖」的确认——即**批准覆盖**） |
 | `--` | **参数分隔符**，其后的参数将直接传递给 Git |
 
 ### 命令参数分支树
@@ -100,6 +101,14 @@ gits [全局选项] <命令> [参数]
 │   │   ├── remove <集合名>    拆除集合全部成员（任一脏即整组中止；永不删分支）
 │   │   │   └── --force        把 --force 透传给 git worktree remove 以越过脏检查
 │   │   └── prune              只清理登记中已不存在的成员（不删磁盘目录、不调 git worktree prune）
+│   │
+│   ├── pack                  按仓库压缩打包（子命令，不再透传给 git）
+│   │   ├── --git-only         只压 .git 目录（与 --no-git 互斥）
+│   │   ├── --no-git           只压工作区、排除 .git（与 --git-only 互斥）
+│   │   ├── --out <dir|file>   输出目录或具体 zip 路径（缺省＝当前所在目录）
+│   │   ├── --exclude <glob>   排除模式，可重复或逗号分隔
+│   │   ├── --overwrite        目标已存在时直接覆盖，不再询问
+│   │   └── --dry-run          只统计不写盘（零副作用）
 │   │
 │   └── <git-command>           Git 命令代理（批量执行所有 git 命令）
 │       ├── status              批量查看状态
@@ -188,6 +197,76 @@ gits [全局选项] <命令> [参数]
 - 创建中途失败 → 只回滚**本次调用**新建的 worktree（内存记账路径清单），调用前既有集合与磁盘不受影响，并点名失败仓；不写集合登记。
 - 默认执行前 review 列出成员与目标路径，`-y` 跳过。
 - `gits worktree <未知子命令>` 报错并以非零码退出（不再静默打 help 后返回 0）；裸 `gits worktree` 仍打 help。
+
+#### 6. 仓库打包（pack）
+
+一条命令把**选中的仓库压缩成一个 zip**：包内每个仓库是一个扁平的顶层目录，目录内的相对路径与该仓库磁盘布局 **1:1 同构**（解包即得 `<仓名>/...` 的原样结构）。顶层目录名取自**仓库目录名**（路径 basename），不是 `config` 里的自定义 `Name`——后者对 worktree 自动登记条目是 `repo1@demo` 这种形式，用它就不与磁盘布局同构。
+
+| 选项 | 说明 | 示例 |
+|------|------|------|
+| （无） | 全量快照：工作区 + `.git` 都压 | `gits pack -r 1,3` |
+| `--git-only` | **只压 `.git` 目录**（含其子路径），排除工作区文件 | `gits pack -r set:demo --git-only` |
+| `--no-git` | **只压工作区**，排除仓库根部的 `.git` 入口 | `gits pack -g backend --no-git` |
+| `--out <目录>` | 输出到指定目录，包名自动生成；目录不存在时按**文件路径**处理（见下） | `gits pack --out D:/backup/` |
+| `--out <文件>` | 输出到**具体 zip 路径**，父目录自动创建，后缀原样保留不补 `.zip` | `gits pack -r 1 --out D:/backup/m1.zip` |
+| `--exclude <glob>` | 排除模式，可重复给或逗号分隔；不含分隔符的模式按**任意目录段**命中即剪掉整棵子树 | `gits pack --exclude node_modules,dist --exclude '*.log'` |
+| `--overwrite` | 目标已存在时直接覆盖，不再询问 | `gits pack --out D:/b/x.zip --overwrite` |
+| `--dry-run` | **只统计不写盘**：打印每仓将写入的文件数与体积、目标路径、目标是否已存在；零副作用 | `gits pack -g backend --dry-run` |
+
+`--git-only` 与 `--no-git` **互斥**，同时给出直接报错并以非零码退出（不定义优先级、不猜意图）。`-p/--parallel` 对 pack 无语义可给（单包只有一条写流），会显式提示已忽略而不是静默丢弃。
+
+**包名（目录形态下自动生成）**：选中 1 个仓库 → `<仓名>__<分支>__<时间戳>.zip`（空仓库/游离 HEAD 的分支位取短 commit id，取不到则为 `nobranch`）；选中多个 → `gits-pack-<时间戳>.zip`。时间戳格式 `20060102-150405`。
+
+**包内结构**：
+```
+<顶层目录 A>/...            ← A 仓的仓库内路径原样对应
+<顶层目录 B>/...
+gits-pack-manifest.json     ← 本次打包清单（保留名，不允许被当成仓库目录）
+```
+manifest 记录每个仓的源路径、分支、`git` 身份（`repo` / `linked-worktree` / `submodule`）、写入文件数与字节数、成败与时间戳，便于事后核对"这个包到底装了什么"。
+
+**顶层目录名冲突 = 整批拒绝**。两个仓库的目录名相同（含**仅大小写不同**，zip 条目在大小写不敏感文件系统上会互相覆盖）时，预检阶段逐对点名并以非零码退出，**一个字节都不写、不自动改名**——由调用方用 `--out` 分开发包。
+
+**执行顺序**：`preparePack` 预检（只读：选择集解析、路径存在性与 git 身份校验、顶层名冲突、目标路径推导）→ review 确认 → 覆盖裁决 → 写入 `.tmp` → `os.Rename` 落定。预检失败不建目录、不写文件；写入中途失败**整包作废**并删除 `.tmp`（截断的"备份"比没有备份更坏），不会留下半个 zip。
+
+**覆盖三态**（目标包已存在时）：
+
+| 情形 | 行为 |
+|------|------|
+| 给了 `--overwrite` | 直接覆盖，不询问 |
+| 给了 `-y/--yes` | **同样直接覆盖**——`-y` 跳过的是全部交互确认，其中包含覆盖确认 |
+| 交互终端 | 显示既有包的体积与修改时间，问 `[y/N]`；答否则跳过本次打包（计为 skipped，**不算失败**、退出码 0） |
+| 非 TTY（管道 / CI），且既没给 `-y` 也没给 `--overwrite` | `[FAIL]` 点名目标并以非零码退出——既不挂等输入，也不静默抹掉既有备份。该判定**排在 review 提示之前**：否则非 TTY 下会先在 review 处读到 EOF 被当成"取消"、打一行「操作已取消」退 0，备份脚本据此以为这次成功了 |
+
+⚠️ **linked worktree 的 `.git` 是指针文件**（约 84 字节的 `gitdir: ...`，指向主仓的 common dir），不是完整仓库数据。`gits pack` **原样压**这个指针文件、不补全主仓对象库、也不阻断打包（只在写入阶段打印一次提示）。因此**压出来的 worktree 目录解包后不能当独立仓库用**；要可迁移的仓库数据，请压主仓，或用 `gits -r <选择> -- bundle create …` 走 git 自身的打包底层命令。
+
+⚠️ **`--out` 形态只有一条判据**：路径已是目录、**或**以 `/` `\` 结尾 → 目录形态（包名自动生成）；否则一律按**文件路径**处理。所以 `--out mybackup`（`mybackup` 不存在）**不是**创建目录 `mybackup/`，而是生成一个名叫 `mybackup` 的文件。
+
+```bash
+# 1) 把全部登记仓库压成一个包，落在当前目录
+gits pack
+
+# 2) 先看看会有多大、装多少文件（不写盘）
+gits pack -g backend --dry-run
+
+# 3) 只备份版本库数据（.git），排除工作区，指定输出目录
+gits pack -r 1-5 --git-only --out D:/backup/
+
+# 4) 只导出工作区源码（不含 .git），压成指定文件
+gits pack -r appollo* --no-git --out D:/backup/src-20261106.zip
+
+# 5) 排除噪音目录/日志（可重复，也可逗号分隔）
+gits pack --exclude node_modules,dist,target --exclude '*.log'
+
+# 6) 只打 worktree 集合的成员（会附带指针文件提示，见上方 ⚠️）
+gits pack -r set:20261106-demo
+
+# 7) 非交互场景：显式授权覆盖，配合 cron/CI 定期备份
+gits pack -g backend --out D:/backup/backend.zip --overwrite
+
+# 8) 双语复跑（切到英文文案）
+gits config language en && gits pack --dry-run
+```
 
 ---
 
@@ -294,6 +373,7 @@ gits -y -- clean -fd
 - `gits <git-command>` — 所有 Git 命令代理
 - `gits worktree add <集合名> …` — 列出集合名、分支、根目录与各成员目标路径
 - `gits worktree remove <集合名> …` — 列出将被拆除的成员与其路径（`--force` 时附警告）
+- `gits pack …` — 列出目标包路径、打包模式、排除模式与待压仓库；**目标包已存在时另有一次覆盖确认**（`--overwrite` 与 `-y` 都会跳过它，即批准覆盖；非 TTY 下不询问直接 `[FAIL]`）；`--dry-run` 不询问、不写盘
 
 `gits worktree list` / `gits worktree prune` 只读或只清登记，不产生破坏性操作，不询问确认。
 
@@ -607,6 +687,15 @@ gits config normalize
 - **`branch:` 对同仓多 worktree 会全部命中**：同一主仓的多个 worktree 共享 refs，`branch:<pattern>` 的判据（`for-each-ref`）与该目录当前检出什么分支无关，因此按分支过滤会把该主仓的所有 worktree 一起选中。修复另立 GitLab 缺陷票 **#1067**；本期 `worktree list` / `set:` 给出的是集合成员身份，不受此影响。
 - **submodule 内不建 worktree**：判定为 submodule 的成员在 `worktree add` 预检阶段直接点名拒绝（`config scan` 也跳过 submodule），本期不支持。
 - **`prune` / `remove` 不碰磁盘与分支**：`prune` 只清理登记（不删目录、不调 `git worktree prune`）；`remove` 永不执行 `git branch -D`。手工删除 worktree 目录后，主仓 `.git/worktrees` 里的记录需由 git 自身处理（`git worktree list` 会标 `prunable`）。
+- **`pack` 只收常规文件**：symlink / junction / socket / fifo / device 一律**跳过并计数**（不解引用、不跟随），避免 `node_modules` 式链接翻倍与 worktree 目录成环；因此包内不保留符号链接。
+- **`pack` 压 linked worktree 不可独立使用**：worktree 的 `.git` 是 84 字节 `gitdir:` 指针文件，原样压入但不补主仓对象库（会在写入阶段点名提示）。要可迁移的仓库数据请压主仓，或走 `gits -r <选择> -- bundle create …`。
+- **`pack` 不解引用嵌套仓库、默认不排除噪音目录**：`.git/modules`、`node_modules`、`target` 等都会被压进来（体积见 `--dry-run`），需要精简由调用方用 `--exclude` 决定，工具不内置词表。
+- **`pack` 无压缩级别开关**：一律用标准库 `archive/zip` 的默认 deflate 级别；`.git` 里已是压缩对象，二次压缩收益有限，故本期不提供 `-9/-0` 之类的调节。
+- **`pack` 的自吞排除只认"本次目标"**：`SelfPaths` 排除的是本次的 `<目标>` 与 `<目标>.tmp`。若把 `--out` 指到某个被压仓库**里面**并反复打包，目录形态每次生成的新时间戳包名不在排除名单内，**上一次产出的整包会被压进这一次**（每跑一次套一层，数字看着都对，但已不是仓库快照）。要避免：`--out` 指到被压仓库之外，或用文件形态固定包名 + `--overwrite`（固定名会命中本次目标排除，不会套娃）。
+- **无人值守请显式给 `-y`**：非 TTY 且目标**不存在**时，`pack` 仍沿用 gits 全局的 review 约定——读到 EOF 视为取消，打一行「操作已取消」并**退出码 0**（这是既有工具级行为，本票未改，改它会影响所有命令）。cron/CI 里必须带 `-y`，并记住 `-y` 同时批准了覆盖。
+- **`pack` 不保留空目录**：zip 里只有顶层仓库目录这一条目录 entry，仓库内的空子目录不入包（无法从标准文件系统读到可复现的"空目录"集合）。因此"解包后目录树与仓库 100% 逐节点相同"不成立，**文件**路径才是一一对应的口径。
+- **`--git-only` 会让嵌套仓库/仓中仓整棵消失**：模式过滤按"根 `.git` 之下"判定，被压仓库内部的其它 `.git` 目录（submodule、仓中仓）不在保留范围内，`--git-only` 下整棵被剪掉且无提示。`--no-git` 则完整保留它们。
+- **`-r` 对未登记的 ID 段是静默跳过**：`-r 1,99` 中 99 不存在时只打 1（仅当**一个都没命中**才报错）。这是选择层的既有口径，`pack` 沿用；打包前建议 `gits config show` 核对，或用 `--dry-run` 看清单。
 
 ---
 
@@ -614,7 +703,7 @@ gits config normalize
 
 ### 技术栈
 - **语言**: Go（跨平台、编译型、高性能）
-- **依赖**: github.com/spf13/cobra（命令行框架）
+- **依赖**: github.com/spf13/cobra（命令行框架）、golang.org/x/term + golang.org/x/sys（终端能力检测：颜色与覆盖确认）；压缩只用标准库 `archive/zip`，无第三方压缩依赖
 
 ### 模块结构
 ```
@@ -624,18 +713,21 @@ gits/
 │   ├── config.go           # config 子命令（add/remove/show/scan/group）
 │   ├── git.go              # Git 命令代理（串行/并行执行）
 │   ├── worktree.go         # worktree 命令族（add/list/remove/prune，三阶段建组）
-│   └── mock.go             # mock 测试命令
-├── internal/
+│   └── pack.go             # pack 命令（预检 → 覆盖三态 → 单包流式写入）
+├── internal/│   ├── archive/            # 打包装配（纯逻辑：不读配置、不打印、不依赖 git 命令）
+│   │   └── pack.go         # 同构遍历/模式过滤/排除/manifest/名称清洗与冲突
 │   ├── config/             # 配置管理
 │   │   ├── loader.go       # 配置加载/保存、Repository/Config 结构体
 │   │   └── manager.go      # 配置操作（增删改查、分组管理）
 │   ├── git/                # Git 操作封装
-│   │   └── executor.go     # Git 命令执行
+│   │   └── executor.go     # Git 命令执行、`Classify` 三态判定
+│   ├── i18n/               # 中/英双语文案字典（`i18n.T(key, args...)`）
 │   ├── repo/               # 仓库管理
 │   │   ├── discover.go     # 仓库扫描发现
 │   │   └── manager.go      # 仓库管理（对外接口层）
 │   └── ui/                 # 输出格式化
-│       └── printer.go      # 结果输出（表格、分组、确认提示）
+│       ├── printer.go      # 结果输出（表格、分组、确认提示）
+│       └── pack.go         # pack 输出（review、覆盖询问、结果行、dry-run 行）
 ├── go.mod
 ├── go.sum
 └── main.go
@@ -691,6 +783,21 @@ gits -- status
 gits -y -- clean -fd
 ```
 
+### 场景五：多仓打包备份 / 交付
+```bash
+# 先估体积：只统计、不写盘（几百 MB 的 .git 压出来不小，先看再压）
+gits pack --dry-run
+
+# 整仓快照（工作区 + .git）落指定目录，包名自动生成
+gits pack -g backend --out D:/backup/
+
+# 只交付源码给外部：排除 .git，再排除构建产物与日志
+# （含通配的模式请整体加引号，否则 shell 会先在当前目录把它展开掉）
+gits pack -g backend --no-git \
+  --exclude node_modules,dist,target --exclude '*.log' \
+  --out D:/deliver/backend-src.zip --overwrite
+```
+
 ---
 
 ## 与 Git 的兼容性
@@ -713,14 +820,24 @@ gits -- pull origin main
 gits -- log --oneline -n 10
 ```
 
-### 例外：`worktree`
-`worktree` 是 gits 的子命令，**不透传**给 git（`gits worktree <sub>` 走集合管理）。原生 `git worktree …` 的批量形态要写成 `gits -r <选择> -- worktree <sub>`，例如：
+### 例外：`worktree` 与 `pack`
+`worktree` 与 `pack` 是 gits 的子命令，**不透传**给 git（`gits worktree <sub>` 走集合管理，`gits pack` 走压缩打包）。原生 `git worktree …` 的批量形态要写成 `gits -r <选择> -- worktree <sub>`，例如：
 
 ```bash
 git worktree list
 gits -r 1,3 -y -- worktree list      # gits 等价命令（透传形态）
 gits worktree list                   # ← 这是 gits 的集合列表，不是 git worktree list
 ```
+
+`pack` 不与任何 git 命令同名（git 侧的底层打包命令是 `pack-objects` / `pack-refs`），因此 `gits pack-objects …` 仍按透传形态走：
+
+```bash
+gits -r 1,3 -y -- repack -a -d                    # 原生 git 打包层命令（透传形态）
+gits -r 1 -- bundle create D:/b/m1.bundle --all    # 可迁移的 git 包（gits pack 不做这件事）
+gits pack                                      # ← gits 自己的压缩打包
+```
+
+多余位置参数会被拒绝并非零退出（`gits pack foo` 不会当成 git 参数发出去，也不会静默打 help 退 0）。
 
 ---
 
@@ -733,6 +850,20 @@ gits worktree list                   # ← 这是 gits 的集合列表，不是 
 | Git 命令失败 | 显示错误信息，继续执行其他仓库 |
 | 配置文件损坏 | 提示用户并提供修复选项 |
 | 权限不足 | 显示权限错误，跳过该仓库 |
+
+`gits pack` 采取**更严的口径**（打包产物是"备份"，宁可不做也不能做错）：
+
+| 情形 | 处理方式 |
+|------|----------|
+| 选中集里有路径缺失 / 不是 git 仓库 / 不是目录 | 预检逐条点名，**整批拒绝**、一个字节不写，非零退出 |
+| 两个仓库目录名相同（含仅大小写不同）或命中保留名 `gits-pack-manifest.json` | 预检点名冲突对，**整批拒绝**、不自动改名 |
+| `--git-only` 与 `--no-git` 同时给出 | 直接报错非零退出（不定义优先级） |
+| 目标目录建不出来 / 目标文件不可写 | 非零退出并点名路径（发生在写入期 `Create`，不预先猜测权限——预检只做只读判定） |
+| 目标包已存在且处于非 TTY（管道 / CI） | `[FAIL]` 点名目标、非零退出——不挂等输入，也不静默覆盖 |
+| 目标包已存在且用户答"不覆盖" | 本次跳过，计入 `Summary` 的 skipped，**退出码 0**（主动跳过不是失败） |
+| 某个文件**打不开 / 取不到信息** | 只记一条计数（结果行的 `读取失败` 与 manifest 的 `failed_files`）并继续，**该仓仍算成功**、退出码不变；只要有任何这样的条目，收尾会补一行「N 个仓库共 M 条条目未能读入包内」——包结构完整，但**不是完整快照** |
+| 往 zip **写入**失败（磁盘满、流错误） | **整包作废**：删除 `.tmp`、不落目标文件、非零退出（半途截断的 entry 混在"备份"里比整包失败更坏） |
+| 源文件**在读取过程中被并发截短**（打包正在 commit/gc 的仓库） | 同上，**整包作废**并点名该 entry——`io.Copy` 读到 EOF 不报错，标准库也不会，所以按"落包字节数 ≠ 文件声明大小"判定；等号不成立即拒绝出包 |
 
 ### 错误输出格式
 ```
@@ -756,6 +887,7 @@ Summary: 1 failed, 3 succeeded
 ### 执行模式
 - **串行模式**: 默认模式，按顺序执行，便于查看输出
 - **并行模式**: 通过 `-p` 或 `--parallel` 启用，适合大量仓库
+- **例外**：`gits pack` 恒为单条写流（一次调用只产出一个包），`-p` 无并行语义可给，会显式提示已忽略
 
 ---
 
