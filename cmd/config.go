@@ -290,6 +290,7 @@ var configScanCmd = &cobra.Command{
 		discovered, err := repo.Discover(scanPath)
 		if err != nil {
 			ui.PrintError(err)
+			exitCode = exitSelectionFailed
 			return
 		}
 

@@ -75,6 +75,16 @@ func TestExitCodeExecutionFailed(t *testing.T) {
 	}
 }
 
+// TestExitCodeConfigScanWalkError 覆盖 config scan 对不存在路径的 walk 错误
+// （同一「用法/输入错误 ⇒ exit 2」口径，#1070 测试棒补充证据要求纳入）。
+func TestExitCodeConfigScanWalkError(t *testing.T) {
+	exitCode = exitOK
+	configScanCmd.Run(configScanCmd, []string{filepath.Join(t.TempDir(), "no-such-dir")})
+	if exitCode != exitSelectionFailed {
+		t.Errorf("exitCode = %d, want %d (scan walk error)", exitCode, exitSelectionFailed)
+	}
+}
+
 // TestExitCodeExecutionSuccess 覆盖全部成功时的退出码（应 exit 0）。
 func TestExitCodeExecutionSuccess(t *testing.T) {
 	withTestFlags(t)
