@@ -73,10 +73,13 @@ func init() {
 }
 
 func initI18n() {
-	cfg, _ := config.Load()
-	if cfg.Language != "" {
+	cfg, err := config.Load()
+	if err == nil && cfg != nil && cfg.Language != "" {
 		i18n.SetLang(i18n.Lang(cfg.Language))
 	} else {
+		// 配置缺失或解析失败时回退系统语言；损坏配置的报错与退出码
+		// 由命令执行路径（runGitCommand 的 config.Load 分支）统一处理，
+		// 不在 init 阶段崩溃。
 		i18n.SetLang(i18n.DetectSystemLang())
 	}
 }
@@ -112,6 +115,13 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// git 透传路径的退出码在 runGitCommand 内按语义设置（0/1/2）：
+	// 选择/配置失败=2、执行阶段有失败=1、全部成功=0。worktree/config
+	// 子命令各自 exitOnError 已直接 os.Exit(1)，不会走到这里。
+	if exitCode != exitOK {
+		os.Exit(exitCode)
 	}
 }
 

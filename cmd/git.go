@@ -15,6 +15,19 @@ import (
 // errNoRepositories 表示配置中尚无任何已注册仓库。
 var errNoRepositories = errors.New("no repositories registered")
 
+// 退出码语义（与 ReadMe「错误处理」节一致）：
+// 0 = 全部成功（或用户主动取消）；
+// 1 = 执行阶段至少一个仓库 git 命令失败（failCount > 0）；
+// 2 = 选择/配置阶段失败（配置读取失败、-r/-g 解析出错、集合/分组不存在、0 匹配）。
+const (
+	exitOK              = 0
+	exitExecutionFailed = 1
+	exitSelectionFailed = 2
+)
+
+// exitCode 记录本进程最终退出码，由 Execute() 在命令执行完成后统一 os.Exit。
+var exitCode = exitOK
+
 // repoDisplayNames 生成仓库回显用的名称列表（review 确认提示与逐仓结果行共用）。
 // 每项为 `[ID] 名称 (当前分支/短 commit id) ← 主仓`（复用 repo.RepoLabels，
 // 口径与 config show / group show / scan 一致）；空仓库（展示值为空串）只省略分支后缀，
@@ -39,8 +52,7 @@ func toRepositoryInfos(repos []config.Repository) []repo.RepositoryInfo {
 }
 
 // selectRepos 根据 -r / -g / 默认 三种模式选择目标仓库。
-// -r 分支基于注入的 cfg 解析（可在测试中构造 config 注入）；
-// -g / 默认 分支沿用既有仓库层查询（内部自行加载配置），行为与之前一致。
+// 全部基于注入的 cfg 解析（可在测试中构造 config 注入），行为与磁盘查询一致。
 func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.RepositoryInfo, error) {
 	// --group 和 --repo 不能同时使用
 	if groupName != "" && repoIDStr != "" {
@@ -69,32 +81,37 @@ func selectRepos(repoIDStr, groupName string, cfg *config.Config) ([]repo.Reposi
 		repos = toRepositoryInfos(configRepos)
 	default:
 		// 使用配置中的全部仓库
-		registered, err := repo.GetRegisteredRepositories()
-		if err != nil {
-			return nil, err
-		}
-		repos = toRepositoryInfos(registered)
+		repos = toRepositoryInfos(cfg.Repositories)
 	}
 	return repos, nil
 }
 
 func runGitCommand(args []string) {
-	groupName := GetGroup()
-	repoIDStr := GetRepoIDs()
-
 	cfg, err := config.Load()
 	if err != nil {
 		ui.PrintError(err)
+		exitCode = exitSelectionFailed
 		return
 	}
+	runGitCommandWithConfig(cfg, args)
+}
+
+// runGitCommandWithConfig 执行 git 透传命令，接受注入的配置（便于测试）：
+// 选择/配置阶段失败 → exitCode=2；执行阶段有仓库失败 → exitCode=1；
+// 全部成功或用户取消 → exitCode=0。
+func runGitCommandWithConfig(cfg *config.Config, args []string) {
+	groupName := GetGroup()
+	repoIDStr := GetRepoIDs()
 
 	repos, err := selectRepos(repoIDStr, groupName, cfg)
 	if errors.Is(err, errNoRepositories) {
 		ui.PrintNoConfigPrompt()
+		exitCode = exitSelectionFailed
 		return
 	}
 	if err != nil {
 		ui.PrintError(err)
+		exitCode = exitSelectionFailed
 		return
 	}
 
@@ -105,6 +122,7 @@ func runGitCommand(args []string) {
 		} else {
 			ui.PrintMessage(i18n.T("no_repositories"))
 		}
+		exitCode = exitSelectionFailed
 		return
 	}
 
@@ -123,11 +141,19 @@ func runGitCommand(args []string) {
 	} else {
 		runGitCommandSequential(repos, names, args)
 	}
+
+	// 执行阶段任一仓库失败 → 退出码 1（选择/配置失败已在此前以 2 退出）
+	if failCount > 0 {
+		exitCode = exitExecutionFailed
+	}
 }
+
+// failCount 记录最近一次执行阶段的失败仓库数（由串行/并行执行函数累加）。
+var failCount = 0
 
 func runGitCommandSequential(repos []repo.RepositoryInfo, names []string, args []string) {
 	successCount := 0
-	failCount := 0
+	failCount = 0
 
 	for i, r := range repos {
 		result := git.Execute(r.Path, args...)
@@ -165,7 +191,7 @@ func runGitCommandParallel(repos []repo.RepositoryInfo, names []string, args []s
 	}()
 
 	successCount := 0
-	failCount := 0
+	failCount = 0
 
 	for rr := range resultChan {
 		ui.PrintGitResult(rr.result, rr.name)
