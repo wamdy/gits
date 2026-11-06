@@ -13,8 +13,8 @@
 | 路径 | 职责 |
 |------|------|
 | `main.go` | 入口，调用 `cmd.Execute()` |
-| `cmd/root.go` | 根命令 + 全局选项：`-g/--group`、`-r/--repo`（ID/区间/名称通配/名称/`branch:`/`set:`）、`-p/--parallel`、`-y/--yes`、`--color=auto\|always\|never`、`--no-color`；i18n 初始化；启动时校验 `--color` 并调用 `ui.InitColorMode`；git 代理参数提取（`--` 分隔符）；注册 `worktree` 子命令族并在 `Long` 里写明裸透传口径 |
-| `cmd/git.go` | Git 命令代理：仓库选择（`repo.ResolveSelectionWithSets` 解析 `-r` / 分组 / 全部）、review 确认、串行/并行执行、汇总 |
+| `cmd/root.go` | 根命令 + 全局选项：`-g/--group`、`-r/--repo`（ID/区间/名称通配/名称/`branch:`/`set:`）、`-p/--parallel`、`-y/--yes`、`--color=auto\|always\|never`、`--no-color`；i18n 初始化；启动时校验 `--color` 并调用 `ui.InitColorMode`；git 代理参数提取（`--` 分隔符）；注册 `worktree` 子命令族并在 `Long` 里写明裸透传口径；**退出码统一出口**（包级 `exitCode`，`Execute` 末尾 `os.Exit`：成功 0 / 执行失败 1 / 选择或配置失败 2；`initI18n` 对配置解析失败回退系统语言、不在 init 阶段崩溃） |
+| `cmd/git.go` | Git 命令代理：仓库选择（`repo.ResolveSelectionWithSets` 解析 `-r` / 分组 / 全部）、review 确认、串行/并行执行、汇总；**退出码语义**（`runGitCommand` 拆出 `runGitCommandWithConfig`：`config.Load` 失败、`-r`/`-g` 解析失败、集合/分组/通配/ID 无匹配均置 `exitCode=2`；执行完成且失败数 >0 置 `exitCode=1`） |
 | `cmd/worktree.go` | worktree 命令族：`add`（阶段 A 只读预检零副作用 → 阶段 B 逐个创建 + 仅回滚本次调用新建的 → 阶段 C 登记集合）、`list`（成员检出分支 + 路径有效性）、`remove`（任一脏即整组中止，`--force` 才透传给 git，永不删分支）、`prune`（只清登记，不删磁盘、不调 `git worktree prune`） |
 | `cmd/config.go` | config 子命令：add/remove/show/rename/reid/scan/language/validate/normalize/group（add/assign/unassign/show）；remove 连带清 worktree 集合并点名受影响集合，validate 兜底清悬空 RepoID 成员 |
 | `internal/config/loader.go` | `Config`/`Repository`/`WorktreeMember`/`WorktreeSet` 结构体、配置加载/保存/原始 JSON；路径相对化（`ConfigBaseDir`/`ResolvePath`/`StoredPath`/`NormalizePaths`，仓库路径与集合成员路径同一口径） |
@@ -42,6 +42,6 @@
 ## 测试
 
 - 内置 `test-repos/`（repo1/repo2/repo3，均为 git 仓库）用于手工验证多仓库操作
-- Go 单测：`cmd`（`selectRepos` 的 `set:` 选择、worktree 预检零副作用与「分支已被检出」点名、重名拒绝、显式范围要求、脏点名、回滚只回本次调用、prune 只清登记、`WorktreeRemove` 不删分支）、`internal/repo`（`ResolveSelection`/`ResolveSelectionWithSets`/`FindReposByWildcard`/`isNoiseDir`/`MemberLabel` 口径）、`internal/ui`（`InitColorMode`、`PrintWorktreeSets`/`PrintWorktreeSetList` 的 missing 标记、`PrintGroupDetails` 按全量登记表反查主仓名）、`internal/config`（路径相对化/解析/搬迁/normalize、worktree 集合连带清理、reid 回写成员、死条目回收）、`internal/git`（`Classify` 三态与两个 `.git` 文件形态对照、worktree 子目录、`WorktreeAdd`/`WorktreeRemove` 生产函数直呼、`WorktreeCheckedOutBranches`）；运行 `go test -count=1 ./...`（实测 5 个 `ok` 包 + 2 个 no-test 包）
+- Go 单测：`cmd`（`selectRepos` 的 `set:` 选择、worktree 预检零副作用与「分支已被检出」点名、重名拒绝、显式范围要求、脏点名、回滚只回本次调用、prune 只清登记、`WorktreeRemove` 不删分支、**退出码三态**：选择/配置失败 exit 2、执行失败 exit 1、成功 exit 0，`exit_code_test.go`）、`internal/repo`（`ResolveSelection`/`ResolveSelectionWithSets`/`FindReposByWildcard`/`isNoiseDir`/`MemberLabel` 口径）、`internal/ui`（`InitColorMode`、`PrintWorktreeSets`/`PrintWorktreeSetList` 的 missing 标记、`PrintGroupDetails` 按全量登记表反查主仓名）、`internal/config`（路径相对化/解析/搬迁/normalize、worktree 集合连带清理、reid 回写成员、死条目回收）、`internal/git`（`Classify` 三态与两个 `.git` 文件形态对照、worktree 子目录、`WorktreeAdd`/`WorktreeRemove` 生产函数直呼、`WorktreeCheckedOutBranches`）；运行 `go test -count=1 ./...`（实测 5 个 `ok` 包 + 2 个 no-test 包）
 - **真实 git 依赖的两种处理，别混为一谈**：`cmd`/`internal/git`/`internal/ui` 的真 git 用例走 `requireGit` 或 `t.Skipf`（无 git 时**跳过**、包仍报 ok）；`internal/repo` 的用例直接 `t.Fatalf`（无 git 时**失败**）。所以「无 git 环境」不会让整扇门悄悄变绿——挡门的是 `internal/repo` 那条硬依赖，改造成 skip 会一并卸掉这层保护
 - 实机端到端（关票门禁）：ASCII 临时目录建 2 个真仓 → `worktree add` 全绿（确认成员条目指向 worktree 目录、`-r set:` 在 worktree 内执行）→ 缺分支预检零副作用（`git worktree list` 佐证）→ `--branch main` 被预检按「已被检出」点名 → 脏成员整组中止 → `--force` 拆除后分支仍在 → `remove`/`prune` 后默认全量批量 0 失败（条目已回收）→ `config reid 3 10` 与 `config reid --all` 后 `set:` 仍全选、`config validate` 不删成员 → `gits worktree bogus` 退出码 1 → `config language en` 双语复跑
