@@ -54,7 +54,8 @@ func extractGitArgs(args []string) []string {
 // 裸 git worktree 透传形态改为 `gits -r <sel> -- worktree <sub>`；
 // 文案集中在 i18n（zh/en 成对），init 与 Execute 两处都走本函数，切语言即刻生效。
 func rootLongText() string {
-	return "gits - " + i18n.T("git_cmd_desc") + "\n\n" + i18n.T("worktree_passthrough_note")
+	return "gits - " + i18n.T("git_cmd_desc") + "\n\n" + i18n.T("worktree_passthrough_note") +
+		"\n" + i18n.T("pack_passthrough_note")
 }
 
 func init() {
@@ -63,6 +64,7 @@ func init() {
 	rootCmd.Short = i18n.T("manage_multi_repos")
 	rootCmd.Long = rootLongText()
 	rootCmd.AddCommand(worktreeCmd)
+	rootCmd.AddCommand(packCmd)
 
 	rootCmd.PersistentFlags().StringVarP(&group, "group", "g", "", i18n.T("execute_on_group"))
 	rootCmd.PersistentFlags().StringVarP(&repoIDs, "repo", "r", "", i18n.T("execute_on_repos"))
@@ -111,6 +113,7 @@ func Execute() {
 
 	initConfigCmdI18n()
 	initWorktreeCmdI18n()
+	initPackCmdI18n()
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
