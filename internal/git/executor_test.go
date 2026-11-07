@@ -348,3 +348,36 @@ func TestClassifyInsideWorktreeSubdir(t *testing.T) {
 		t.Errorf("Classify(主仓子目录) = %d, want KindRepo", got)
 	}
 }
+
+// TestCurrentBranch 验证 #1067 的检出分支读取：正常检出返回分支名，游离 HEAD 与非 git 目录返回空串。
+func TestCurrentBranch(t *testing.T) {
+	requireGit(t)
+	base := t.TempDir()
+	main := filepath.Join(base, "m")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, main, "init")
+	if err := os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, main, "add", "f.txt")
+	gitIn(t, main, "commit", "-m", "init")
+	if got := CurrentBranch(main); got != "main" {
+		t.Fatalf("CurrentBranch(正常检出) = %q, want %q", got, "main")
+	}
+
+	gitIn(t, main, "checkout", "-b", "feature/x")
+	if got := CurrentBranch(main); got != "feature/x" {
+		t.Fatalf("CurrentBranch(切分支后) = %q, want %q", got, "feature/x")
+	}
+
+	gitIn(t, main, "checkout", "--detach")
+	if got := CurrentBranch(main); got != "" {
+		t.Fatalf("CurrentBranch(游离 HEAD) = %q, want 空串", got)
+	}
+
+	if got := CurrentBranch(filepath.Join(base, "not-a-repo")); got != "" {
+		t.Fatalf("CurrentBranch(非 git 目录) = %q, want 空串", got)
+	}
+}

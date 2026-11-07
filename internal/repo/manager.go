@@ -293,6 +293,33 @@ func FindReposByBranch(pattern string, repos []config.Repository, checker Branch
 	return result, nil
 }
 
+// CheckedOutMatcher 判断 repoPath 当前检出的分支是否匹配 pattern（glob，path.Match，与 branch: 同口径）。
+type CheckedOutMatcher func(repoPath string, pattern string) bool
+
+// DefaultCheckedOutMatcher 基于 git 层实现：取当前检出分支（symbolic-ref，#1067），path.Match 通配。
+// 游离 HEAD / 非 git 目录返回空串 ⇒ 不匹配任何 pattern。
+func DefaultCheckedOutMatcher(repoPath string, pattern string) bool {
+	branch := git.CurrentBranch(repoPath)
+	if branch == "" {
+		return false
+	}
+	ok, _ := path.Match(pattern, branch)
+	return ok
+}
+
+// FindReposByCheckedOut 遍历 repos，返回当前检出分支匹配 pattern 的仓库（#1067：
+// 同仓多 worktree 共享 refs，`branch:` 的 ref 存在判定会把主检出与各 worktree 无差别全命中；
+// `checkedout:` 按「该目录实际检出」过滤，作用域与分支真正所在的工作区一致）。
+func FindReposByCheckedOut(pattern string, repos []config.Repository) []config.Repository {
+	var result []config.Repository
+	for _, r := range repos {
+		if DefaultCheckedOutMatcher(r.Path, pattern) {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
 // ResolveSelection 解析 -r 选择值（逗号分段），支持 ID / ID 区间 / 名称通配 / 名称精确 /
 // branch: 段混合，结果按仓库 ID 去重。0 匹配时返回空切片与 nil 错误。
 // 保留为 ResolveSelectionWithSets 的薄壳（不破坏既有调用方与单测签名）。
@@ -337,6 +364,17 @@ func ResolveSelectionWithSets(raw string, repos []config.Repository, sets []conf
 				return nil, err
 			}
 			for _, r := range matched {
+				if !seen[r.ID] {
+					seen[r.ID] = true
+					result = append(result, r)
+				}
+			}
+		case strings.HasPrefix(seg, "checkedout:"): // #1067 按当前检出分支过滤（与 branch: 的 ref 存在语义区分）
+			pattern := strings.TrimPrefix(seg, "checkedout:")
+			if pattern == "" {
+				return nil, errors.New(i18n.T("checkedout_filter_invalid_empty"))
+			}
+			for _, r := range FindReposByCheckedOut(pattern, repos) {
 				if !seen[r.ID] {
 					seen[r.ID] = true
 					result = append(result, r)
