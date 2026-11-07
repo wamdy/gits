@@ -151,8 +151,9 @@ var dict = map[Lang]map[string]string{
 		"wildcard_no_match":           "通配符未匹配到任何仓库",
 		"color_desc":                  "颜色输出模式（auto|always|never）",
 		"no_color_desc":               "禁用颜色输出（等价于 --color=never）",
-		"repo_selection_note":         "在指定仓库上执行命令（支持 ID 列表、名称通配如 repo*、branch:分支模式、set:集合名、或混合使用）",
+		"repo_selection_note":         "在指定仓库上执行命令（支持 ID 列表、名称通配如 repo*、branch:分支存在、checkedout:检出分支、set:集合名、或混合使用）",
 		"branch_filter_invalid_empty": "branch: 后的分支模式不能为空",
+		"checkedout_filter_invalid_empty": "checkedout: 后的分支模式不能为空",
 		"branch_filter_no_checker":    "分支过滤不可用",
 		// worktree（#1064）：集合选择、归属标记、config show 集合块；
 		// 命令族文案沿用 worktree_* / set_* 前缀（第二刀补齐）。
@@ -344,8 +345,9 @@ var dict = map[Lang]map[string]string{
 		"wildcard_no_match":           "No repositories matched by wildcard",
 		"color_desc":                  "Color output mode (auto|always|never)",
 		"no_color_desc":               "Disable color output (equivalent to --color=never)",
-		"repo_selection_note":         "Execute command on specified repositories (ID list, name wildcard like repo*, branch: pattern, set:<name>, or mixed)",
+		"repo_selection_note":         "Execute command on specified repositories (ID list, name wildcard like repo*, branch: ref exists, checkedout:<branch> checked out, set:<name>, or mixed)",
 		"branch_filter_invalid_empty": "branch: pattern cannot be empty",
+		"checkedout_filter_invalid_empty": "checkedout: pattern cannot be empty",
 		"branch_filter_no_checker":    "branch filter is unavailable",
 		// worktree (#1064): set selection, ownership mark, config show set block.
 		// Command-family copy keeps the worktree_* / set_* prefix (added with the next slice).

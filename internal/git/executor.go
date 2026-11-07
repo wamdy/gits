@@ -75,6 +75,18 @@ func BranchExists(repoPath string, pattern string) (bool, error) {
 	return result.Output != "", nil
 }
 
+// CurrentBranch 返回 repoPath 当前检出的本地分支名（git symbolic-ref -q --short HEAD）。
+// 游离 HEAD（detached）与非 git 目录返回空串——调用方语义：不可能「检出」任何分支。
+// #1067：`checkedout:` 选择段用它按「实际检出」过滤，与 BranchExists 的「ref 存在」语义区分
+// （同一仓库的所有 linked worktree 共享 refs，ref 存在判定会把主检出与各 worktree 无差别全命中）。
+func CurrentBranch(repoPath string) string {
+	result := Execute(repoPath, "symbolic-ref", "-q", "--short", "HEAD")
+	if !result.Success {
+		return ""
+	}
+	return strings.TrimSpace(result.Output)
+}
+
 // GitEntryKind 表示一个目录相对 git 的身份（判定底座三态 + 非 git）。
 type GitEntryKind int
 

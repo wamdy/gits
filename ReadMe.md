@@ -234,6 +234,20 @@ gits -r 1-3,branch:feature/X -- pull
 
 说明：`branch:feature/X` 等价于仓库同时命中 `refs/heads/feature/X` 或 `refs/remotes/*/feature/X` 中任一分支；`pattern` 支持 `*` 与 `?` 通配。
 
+### 按检出分支过滤（`checkedout:` 段，#1067）
+
+`-r` 还支持 `checkedout:<pattern>` 段，只选中**当前检出了匹配分支**的目录（判据 `git symbolic-ref -q --short HEAD`）：
+
+```bash
+# 只对真正检出 feature/a 的工作区执行（主检出与其他 worktree 不命中）
+gits -r checkedout:feature/a -y -- rev-parse --abbrev-ref HEAD
+
+# glob：所有检出 feature/* 的工作区
+gits -r checkedout:feature/* -- status
+```
+
+⚠️ **与 `branch:` 的区别（worktree 场景必读）**：同一仓库的所有 linked worktree **共享 refs**，`branch:feature/a` 的「ref 存在」判据会把主检出与每个 worktree 无差别全部命中（作用域静默扩大，worktree 类命令会被 git 以「分支已被检出」拒绝）。要让作用域跟「分支真正所在的工作区」走，用 `checkedout:`；要按「分支在哪个仓库存在」批量，用 `branch:`。游离 HEAD（detached）的目录不命中任何 `checkedout:` 模式。
+
 ### 按 worktree 集合选择（`set:` 段）
 
 `-r` 还支持 `set:<集合名>` 段，选中某个 worktree 集合的**全部成员工作区**（按成员的 `repo_id` 命中，与 ID/区间/通配/名称/`branch:` 混用时按 ID 去重）；集合名不存在直接报错点名，不会静默返回空。

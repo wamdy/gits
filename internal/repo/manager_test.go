@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -450,4 +451,91 @@ func TestMemberLabelSingleSource(t *testing.T) {
 	if len(IndexByID(nil)) != 0 {
 		t.Error("IndexByID(nil) 应为空索引")
 	}
+}
+
+// gitInRepo 在 dir 内执行 git 命令并断言成功（固定提交者身份；internal/repo 的用例按
+// AGENTS.md 约定在无 git 环境【失败】而非跳过——挡门语义不降级）。
+func gitInRepo(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{
+		"-c", "user.email=gits-test@example.com",
+		"-c", "user.name=gits-test",
+		"-c", "init.defaultBranch=main",
+		"-c", "core.autocrlf=false",
+		"-c", "commit.gpgsign=false",
+	}, args...)...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+// TestResolveSelectionCheckedOutMatchesWorktreeState（#1067）：主检出 + 两个 linked
+// worktree 的三态对照——`branch:` 保持 ref 存在语义（同仓共享 refs ⇒ 三处全命中），
+// `checkedout:` 按「该目录实际检出」过滤（只有真正检出该分支的目录命中）。
+func TestResolveSelectionCheckedOutMatchesWorktreeState(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("git 不在 PATH 上，无法验证 checkedout: 选择语义: %v", err)
+	}
+	base := t.TempDir()
+	mDir := filepath.Join(base, "m")
+	wtA := filepath.Join(base, "wt-a")
+	wtB := filepath.Join(base, "wt-b")
+	if err := os.MkdirAll(mDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, mDir, "init")
+	if err := os.WriteFile(filepath.Join(mDir, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, mDir, "add", "f.txt")
+	gitInRepo(t, mDir, "commit", "-m", "init")
+	gitInRepo(t, mDir, "branch", "feature/a")
+	gitInRepo(t, mDir, "branch", "feature/b")
+	gitInRepo(t, mDir, "worktree", "add", wtA, "feature/a")
+	gitInRepo(t, mDir, "worktree", "add", wtB, "feature/b")
+
+	repos := []config.Repository{
+		{ID: 1, Name: "m", Path: mDir},
+		{ID: 2, Name: "wt-a", Path: wtA},
+		{ID: 3, Name: "wt-b", Path: wtB},
+	}
+
+	tests := []struct {
+		name string
+		raw  string
+		want []int
+	}{
+		{"checkedout 精确命中 wt-a", "checkedout:feature/a", []int{2}},
+		{"checkedout 精确命中主检出", "checkedout:main", []int{1}},
+		{"checkedout 通配", "checkedout:feature/*", []int{2, 3}},
+		{"branch: 保持 ref 存在语义（三处全命中）", "branch:feature/a", []int{1, 2, 3}},
+		{"混合段去重", "checkedout:main,2", []int{1, 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveSelectionWithSets(tt.raw, repos, nil, DefaultBranchChecker)
+			if err != nil {
+				t.Fatalf("ResolveSelectionWithSets(%q) unexpected error: %v", tt.raw, err)
+			}
+			ids := make([]int, 0, len(got))
+			for _, r := range got {
+				ids = append(ids, r.ID)
+			}
+			if len(ids) != len(tt.want) {
+				t.Fatalf("ResolveSelectionWithSets(%q) = %v, want %v", tt.raw, ids, tt.want)
+			}
+			for i := range ids {
+				if ids[i] != tt.want[i] {
+					t.Errorf("ResolveSelectionWithSets(%q)[%d] = ID %d, want %d", tt.raw, i, ids[i], tt.want[i])
+				}
+			}
+		})
+	}
+
+	t.Run("checkedout 空模式报错", func(t *testing.T) {
+		if _, err := ResolveSelectionWithSets("checkedout:", repos, nil, DefaultBranchChecker); err == nil {
+			t.Error("checkedout: 空模式应报错")
+		}
+	})
 }
