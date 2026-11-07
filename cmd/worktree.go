@@ -68,7 +68,14 @@ var worktreePruneCmd = &cobra.Command{
 }
 
 // exitOnError 统一命令层失败出口：走 ui 的错误口径并以非零码退出（AC-02.2 要求预检失败非零退出）。
+//
+// err 为 nil 时**什么都不做**：本函数原先无条件打印 + 退出，于是 `exitOnError(someErr())`
+// 这种「把返回值直接喂进来」的写法会把成功路径也判成失败（实机验证抓到 pack 的 dry-run
+// 正是这样每次都报「错误: <nil>」并退 1）。加 nil 守卫后这类写法不再致命。
 func exitOnError(err error) {
+	if err == nil {
+		return
+	}
 	ui.PrintError(err)
 	os.Exit(1)
 }
