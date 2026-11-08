@@ -424,7 +424,8 @@ func PrintReviewPrompt(repoNames []string, command string, args []string) bool {
 	for _, name := range repoNames {
 		fmt.Printf("  - %s%s%s\n", ColorBlue, name, ColorReset)
 	}
-	fmt.Printf("\n%s%s? [y/N]:%s ", ColorYellow, i18n.T("proceed_prompt"), ColorReset)
+	// proceed_prompt 文案自带问号，此处不再补 "?"（避免出现 `是否继续？? [y/N]`）。
+	fmt.Printf("\n%s%s [y/N]:%s ", ColorYellow, i18n.T("proceed_prompt"), ColorReset)
 
 	var response string
 	fmt.Scanln(&response)

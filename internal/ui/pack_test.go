@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,10 +115,10 @@ func TestPrintPackResultRowAndDryRunRow(t *testing.T) {
 	}
 }
 
-// TestProceedPromptHasSingleQuestion 钉住「问号重复」这一类：
-// proceed_prompt 文案自带问号，任何调用点都不许再补一个 `?`
-// （printer.go 的 printWorktreeReview 修过一次，pack 的 review 复制旧变体又踩了，
-// 实机打出「是否继续？? [y/N]」）。
+// TestProceedPromptHasSingleQuestion 只钉文案本身（proceed_prompt 以问号结尾）。
+// 它测不到调用点——printer.go 的 PrintReviewPrompt 曾在此前提下又补了一个 `?`，
+// 实机打出「是否继续？? [y/N]」而本测试照旧全绿（#1253）。真正的守卫是同文件的
+// TestProceedPromptCallSitesAppendNoQuestion。
 func TestProceedPromptHasSingleQuestion(t *testing.T) {
 	prev := i18n.CurrentLang()
 	defer i18n.SetLang(prev)
@@ -127,5 +130,51 @@ func TestProceedPromptHasSingleQuestion(t *testing.T) {
 		if last != '?' && last != '？' {
 			t.Errorf("%s 的 proceed_prompt 不以问号结尾（本测试的前提变了）：%q", lang, prompt)
 		}
+	}
+}
+
+// TestProceedPromptCallSitesAppendNoQuestion 是「问号重复」的真守卫（#1253）：
+// 逐行扫描模块内所有 Go 源码里的 `i18n.T("proceed_prompt")` 调用点，要求调用表达式以外
+// 不再出现 `?`/`？`——文案自带问号，调用点再补一个就成 `是否继续？? [y/N]`。
+// 扫到的调用点数为 0 即 FAIL：字面量失效（改名、改成变量拼接）时不许退化成空跑假绿。
+func TestProceedPromptCallSitesAppendNoQuestion(t *testing.T) {
+	const call = `i18n.T("proceed_prompt")`
+	root := filepath.Join("..", "..") // internal/ui → 模块根
+	sites := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == "node_modules" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			idx := strings.Index(line, call)
+			if idx < 0 {
+				continue
+			}
+			sites++
+			rest := line[:idx] + line[idx+len(call):]
+			if strings.ContainsAny(rest, "?？") {
+				t.Errorf("%s:%d 调用点自行补了问号（文案已自带）：%s", path, i+1, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描 %s 失败：%v", root, err)
+	}
+	if sites < 3 {
+		t.Fatalf("只扫到 %d 个 proceed_prompt 调用点，扫描口径已失效（期望 >= 3：printer.go 两处 + pack.go 两处）", sites)
 	}
 }
