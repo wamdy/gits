@@ -14,7 +14,7 @@
 |------|------|
 | `main.go` | 入口，调用 `cmd.Execute()` |
 | `cmd/root.go` | 根命令 + 全局选项：`-g/--group`、`-r/--repo`（ID/区间/名称通配/名称/`branch:`/`set:`）、`-p/--parallel`、`-y/--yes`、`--color=auto\|always\|never`、`--no-color`；i18n 初始化；启动时校验 `--color` 并调用 `ui.InitColorMode`；git 代理参数提取（`--` 分隔符）；注册 `worktree` 子命令族并在 `Long` 里写明裸透传口径；**退出码统一出口**（包级 `exitCode`，`Execute` 末尾 `os.Exit`：成功 0 / 执行失败 1 / 选择或配置失败 2；`initI18n` 对配置解析失败回退系统语言、不在 init 阶段崩溃） |
-| `cmd/git.go` | Git 命令代理：仓库选择（`repo.ResolveSelectionWithSets` 解析 `-r` / 分组 / 全部）、review 确认、串行/并行执行、汇总；**退出码语义**（`runGitCommand` 拆出 `runGitCommandWithConfig`：`config.Load` 失败、`-r`/`-g` 解析失败、集合/分组/通配/ID 无匹配均置 `exitCode=2`；执行完成且失败数 >0 置 `exitCode=1`） |
+| `cmd/git.go` | Git 命令代理：仓库选择（`repo.ResolveSelectionWithSets` 解析 `-r` / 分组 / 全部）、review 确认、串行/并行执行、逐仓明细留存（`gitResultItem` + `summarizeGitFailure`，并行按选择索引归位）+ 计数行与两段清单；**退出码语义**（`runGitCommand` 拆出 `runGitCommandWithConfig`：`config.Load` 失败、`-r`/`-g` 解析失败、集合/分组/通配/ID 无匹配均置 `exitCode=2`；执行完成且失败数 >0 置 `exitCode=1`） |
 | `cmd/worktree.go` | worktree 命令族：`add`（阶段 A 只读预检零副作用 → 阶段 B 逐个创建 + 仅回滚本次调用新建的 → 阶段 C 登记集合）、`list`（成员检出分支 + 路径有效性）、`remove`（任一脏即整组中止，`--force` 才透传给 git，永不删分支）、`prune`（只清登记，不删磁盘、不调 `git worktree prune`） |
 | `cmd/config.go` | config 子命令：add/remove/show/rename/reid/scan/language/validate/normalize/group（add/assign/unassign/show）；remove 连带清 worktree 集合并点名受影响集合，validate 兜底清悬空 RepoID 成员 |
 | `cmd/pack.go` | pack 命令：`packModeOf`（`--git-only`/`--no-git` 互斥判定）→ `preparePack`（**阶段 A 全量只读预检**：选择集解析、`git.Classify` 身份校验、顶层目录名冲突点名、`--out` 目录/文件形态推导、覆盖三态裁决）→ `writePackArchive`（阶段 B：`.tmp` 流式写入 → `os.Rename` 落定，失败即删 tmp）；`--dry-run` 只走阶段 A 并打印计数（零副作用） |
@@ -25,7 +25,7 @@
 | `internal/i18n/i18n.go` | 中/英双语字典，`i18n.T(key, args...)` 取文案 |
 | `internal/repo/discover.go` | 仓库发现：`Discover()` 目录遍历找 `.git`（跳过 9 种噪音目录）+ 8-worker pool 并发采集 branch/status；**遍历协程与调用协程的结果消费循环必须并行推进**——`found`/`results` 各带 64 缓冲，若遍历在调用协程内同步跑完才收结果，worker 写满 `results` 即不再读 `found`、遍历写满 `found` 即无人读，候选数越过 64+64+8≈136 触发 `all goroutines are asleep - deadlock`（#1070，回归钉 `TestDiscoverManyCandidatesNoDeadlock`）；`GetRepositoryInfo` |
 | `internal/repo/manager.go` | 仓库管理门面（转发到 config 包）+ `ResolveSelectionWithSets`（ID/区间/通配/名称/`branch:`/`checkedout:`/`set:` 选择，`ResolveSelection` 为薄壳）+ 列出口径 `DisplayBranch`/`DisplayLabel`/`DisplayLabelWithWorktree`/`RepoLabels`/`WorktreeMark`/`WorktreeMainName` |
-| `internal/ui/printer.go` | 输出格式化：表格、分组、review 提示、config show 配置项/默认值块与 worktree 集合块、`worktree list` 明细、worktree add/remove 确认、**ANSI 颜色**（`ColorMode` 变量，`InitColorMode` 按终端能力置 ANSI 或空串） |
+| `internal/ui/printer.go` | 输出格式化：表格、分组、review 提示、config show 配置项/默认值块与 worktree 集合块、`worktree list` 明细、worktree add/remove 确认、**结尾结果清单**（`ResultItem` + `PrintResultList`：失败/成功两段、失败项带单行原因、空段不打印）、**ANSI 颜色**（`ColorMode` 变量，`InitColorMode` 按终端能力置 ANSI 或空串） |
 | `internal/ui/isvt_windows.go` / `isvt_other.go` | 平台差异的 `supportsVT()`：Windows 查 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`；其余平台恒 true |
 | `internal/ui/pack.go` | pack 专属输出：`StdinIsTerminal()`（判 **stdin** 而非 stdout——覆盖确认要读输入）、`HumanBytes`、`PrintPackReview`、`AskPackOverwrite`（列出已存在目标的体积与修改时间）、`PrintPackResultRow`/`PrintPackDryRunRow`/`PrintPackSummary`；颜色一律引用 `printer.go` 的 `Color*` 变量 |
 
@@ -41,7 +41,7 @@
 - **i18n**：所有用户可见字符串必须经 `i18n.T()` 取文案，zh/en 双语成对维护；该约定已由机械门兜住——`internal/i18n/i18n_test.go` 的 `TestZhEnKeyParity` 校验两侧键集完全相等、`TestEveryUsedKeyExists` 全仓正则扫 `i18n.T("…")` 的键并逐个查字典（扫到 0 个键即 FAIL，防止正则失效把门禁变成空转）
 - **颜色**：集中在 `internal/ui/printer.go` 的 `Color*` 包级变量；`cmd/root.go` 启动时按 `--color`/`--no-color`/终端能力经 `InitColorMode` 统一置 ANSI 码或空串（56 处调用点引用变量，零逐点改动）；auto 模式尊重 `NO_COLOR` 与非 TTY 检测
 - **命令代理**：git 命令透传，`--` 分隔 gits 参数与 git 参数；执行前默认 review 确认（`-y` 跳过）。`worktree` 注册为子命令后 `gits worktree <sub>` **不再透传**，裸 git worktree 用 `gits -r <选择> -- worktree <sub>`（root 与 worktree 的 `Long` 均写明；文案 key `worktree_passthrough_note`，zh/en 成对）
-- **输出风格**：成功 `[OK]`、失败 `[FAIL]`、结尾 `Summary: N failed, N succeeded`
+- **输出风格**：成功 `[OK]`、失败 `[FAIL]`、结尾 `Summary: N failed, N succeeded` 之后追加「失败仓库」「成功仓库」两段逐条清单（#1276 / REQ-TOOLS-02）：失败项带单行原因摘要（`error:`/`fatal:` 首行，其次执行错误，最后通用文案，超 160 字符按 rune 截断补 `…`）、成功项带 `[ID]名称(分支)` 标签 + 路径；**顺序按 `-r`/`-g` 选择索引**（并行也要归位重排，同命令多次运行可 diff）；空段不打印；`config scan` 不在覆盖范围（added/skipped 语义不同）
 
 ## 测试
 

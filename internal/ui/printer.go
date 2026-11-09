@@ -358,6 +358,55 @@ func PrintSummary(successCount, failCount int) {
 		ColorGreen, successCount, ColorReset, i18n.T("succeeded"))
 }
 
+// ResultItem 是结尾清单里的单仓明细（#1276 REQ-TOOLS-02）。
+// Label 为 `[ID] 名称 (分支)` 回显标签（口径统一由 cmd 层用 repo.RepoLabels 算好），
+// ErrText 只由失败项携带（单行原因摘要）；Label 为空时退化为只显示 Path。
+type ResultItem struct {
+	Label   string
+	Path    string
+	Success bool
+	ErrText string
+}
+
+// PrintResultList 在计数行之后追加「失败仓库」「成功仓库」两段清单（#1276 Q7）。
+// 计数行只回答"多少"，清单回答"哪些"——大批量并行时逐仓行会滚出屏幕，结尾清单是
+// 可贴工单的稳定快照。顺序由调用方按选择索引给好（Q9），本函数不做二次排序。
+// 某段为空即整段不打印：纯成功 / 纯失败 / 空选择都不会留下空标题。
+func PrintResultList(items []ResultItem) {
+	if len(items) == 0 {
+		return
+	}
+	printResultSection("failed_list", items, false /*success*/, true /*withReason*/)
+	printResultSection("succeeded_list", items, true, false)
+}
+
+func printResultSection(titleKey string, items []ResultItem, wantSuccess, withReason bool) {
+	selected := make([]ResultItem, 0, len(items))
+	for _, it := range items {
+		if it.Success == wantSuccess {
+			selected = append(selected, it)
+		}
+	}
+	if len(selected) == 0 {
+		return
+	}
+	fmt.Printf("%s%s:%s\n", ColorCyan, i18n.T(titleKey), ColorReset)
+	for _, it := range selected {
+		if it.Label != "" {
+			fmt.Printf("  %s%s%s  %s", ColorBlue, it.Label, ColorReset, it.Path)
+		} else {
+			fmt.Printf("  %s", it.Path)
+		}
+		if withReason {
+			if it.ErrText != "" {
+				fmt.Printf("  %s\n", i18n.T("fail_reason", it.ErrText))
+				continue
+			}
+		}
+		fmt.Println()
+	}
+}
+
 func PrintError(err error) {
 	fmt.Printf("%s%s:%s %v\n", ColorRed, i18n.T("error_prefix"), ColorReset, err)
 }
