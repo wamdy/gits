@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 
@@ -151,26 +152,119 @@ func runGitCommandWithConfig(cfg *config.Config, args []string) {
 // failCount 记录最近一次执行阶段的失败仓库数（由串行/并行执行函数累加）。
 var failCount = 0
 
+// gitResultItem 单仓执行明细（结尾清单用，#1276）。index 记该仓在选择集里的原始位置：
+// 并行执行按完成顺序消费 channel，清单必须按 index 归位才能保证"同命令多次运行顺序一致"（Q9）。
+type gitResultItem struct {
+	index   int
+	label   string
+	path    string
+	success bool
+	errText string
+}
+
+// maxFailureSummaryRunes 限制单条失败原因的长度（按 rune 计，避免截断半个汉字）：
+// 一条 git 报错动辄几十行，整段塞进结尾清单会把清单本身冲掉。
+const maxFailureSummaryRunes = 160
+
+// newGitResultItem 由执行结果构造清单条目；失败项即时算好单行原因摘要。
+func newGitResultItem(index int, label, path string, result git.ExecutionResult) gitResultItem {
+	item := gitResultItem{index: index, label: label, path: path, success: result.Success}
+	if !result.Success {
+		item.errText = summarizeGitFailure(result)
+	}
+	return item
+}
+
+// summarizeGitFailure 生成单行失败原因摘要：优先取 git 自身输出的首个非空行
+// （Execute 用 CombinedOutput，git 的错误事实在 stderr 首行，如 `error: pathspec ... did not match`），
+// 其次取执行错误（`exit status 128` 这类信息量低，故排在输出之后），都没有则回退通用文案。
+func summarizeGitFailure(result git.ExecutionResult) string {
+	reason := firstNonEmptyLine(result.Output)
+	if reason == "" && result.Error != nil {
+		reason = result.Error.Error()
+	}
+	if reason == "" {
+		return i18n.T("git_cmd_failed")
+	}
+	return truncateRunes(collapseSpaces(reason), maxFailureSummaryRunes)
+}
+
+// firstNonEmptyLine 取首行非空白内容（已去首尾空白）。
+func firstNonEmptyLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// collapseSpaces 把行内连续空白压成单空格：git 对多字节字符做对齐填充，
+// 原样带进清单会出现大片空白（宽度按字节算时尤甚）。
+func collapseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// truncateRunes 按 rune 截断，超长补省略号（不产生非法 UTF-8 片段）。
+func truncateRunes(s string, limit int) string {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "…"
+}
+
+// itemsInSelectionOrder 返回按选择索引升序的副本（不改动入参）。
+func itemsInSelectionOrder(items []gitResultItem) []gitResultItem {
+	ordered := make([]gitResultItem, len(items))
+	copy(ordered, items)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].index < ordered[j].index })
+	return ordered
+}
+
+// countGitResults 统计成功/失败仓库数（纯函数，便于单测；清单本身不改计数口径）。
+func countGitResults(items []gitResultItem) (successCount, failTotal int) {
+	for _, it := range items {
+		if it.success {
+			successCount++
+			continue
+		}
+		failTotal++
+	}
+	return successCount, failTotal
+}
+
+// printGitCommandSummary 输出计数行 + 结尾两段清单，并同步包级 failCount（退出码依据）。
+func printGitCommandSummary(items []gitResultItem) {
+	successCount, failTotal := countGitResults(items)
+	failCount = failTotal
+	ui.PrintSummary(successCount, failTotal)
+
+	ordered := itemsInSelectionOrder(items)
+	list := make([]ui.ResultItem, 0, len(ordered))
+	for _, it := range ordered {
+		list = append(list, ui.ResultItem{Label: it.label, Path: it.path, Success: it.success, ErrText: it.errText})
+	}
+	ui.PrintResultList(list)
+}
+
 func runGitCommandSequential(repos []repo.RepositoryInfo, names []string, args []string) {
-	successCount := 0
-	failCount = 0
+	items := make([]gitResultItem, 0, len(repos))
 
 	for i, r := range repos {
 		result := git.Execute(r.Path, args...)
 		ui.PrintGitResult(result, names[i])
-		if result.Success {
-			successCount++
-		} else {
-			failCount++
-		}
+		items = append(items, newGitResultItem(i, names[i], r.Path, result))
 	}
 
-	ui.PrintSummary(successCount, failCount)
+	printGitCommandSummary(items)
 }
 
 func runGitCommandParallel(repos []repo.RepositoryInfo, names []string, args []string) {
 	type repoResult struct {
+		index  int
 		name   string
+		path   string
 		result git.ExecutionResult
 	}
 
@@ -179,10 +273,10 @@ func runGitCommandParallel(repos []repo.RepositoryInfo, names []string, args []s
 
 	for i, r := range repos {
 		wg.Add(1)
-		go func(name, repoPath string) {
+		go func(index int, name, repoPath string) {
 			defer wg.Done()
-			resultChan <- repoResult{name: name, result: git.Execute(repoPath, args...)}
-		}(names[i], r.Path)
+			resultChan <- repoResult{index: index, name: name, path: repoPath, result: git.Execute(repoPath, args...)}
+		}(i, names[i], r.Path)
 	}
 
 	go func() {
@@ -190,17 +284,12 @@ func runGitCommandParallel(repos []repo.RepositoryInfo, names []string, args []s
 		close(resultChan)
 	}()
 
-	successCount := 0
-	failCount = 0
-
+	// 逐仓行仍按完成顺序即时打印（保留并行的实时反馈），结尾清单按 index 归位（Q9）
+	items := make([]gitResultItem, 0, len(repos))
 	for rr := range resultChan {
 		ui.PrintGitResult(rr.result, rr.name)
-		if rr.result.Success {
-			successCount++
-		} else {
-			failCount++
-		}
+		items = append(items, newGitResultItem(rr.index, rr.name, rr.path, rr.result))
 	}
 
-	ui.PrintSummary(successCount, failCount)
+	printGitCommandSummary(items)
 }

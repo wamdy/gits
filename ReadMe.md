@@ -892,13 +892,31 @@ gits pack                                      # ← gits 自己的压缩打包
 
 ### 错误输出格式
 ```
-[FAIL] /path/to/repo: git pull failed
+[FAIL] [2] repo2 (main) /path/to/repo: git pull failed
        Error: fatal: could not read Password for 'https://github.com': terminal prompts disabled
 
-[OK]   /path/to/repo2: Already up to date.
+[OK]   [1] repo1 (main) /path/to/repo2: Already up to date.
 
 Summary: 1 failed, 3 succeeded
+失败仓库:
+  [2] repo2 (main)  /path/to/repo 原因：fatal: could not read Password for 'https://github.com': terminal prompts disabled
+成功仓库:
+  [1] repo1 (main)  /path/to/repo2
+  [3] repo3 (main)  /path/to/repo3
 ```
+
+结尾的两段清单（`失败仓库` / `成功仓库`）回答"**哪些**仓库成功或失败"，计数行只回答"多少"——
+大批量并行时逐仓行会滚出屏幕，清单是可整段贴进工单的稳定快照：
+
+- **覆盖范围**：只覆盖 git 批量命令（串行 `-p` 不启用时 / 并行两种模式都含）。`config scan` 的
+  added/skipped 语义不同，不在清单覆盖范围内（仍只有计数行）。
+- **顺序稳定**：按 `-r` / `-g` 的选择顺序输出（并行也如此，结果按选择索引归位后再打清单），
+  同一命令多次运行的清单可直接 diff。
+- **失败项带原因摘要**：取 git 输出的首个非空行（`error:` / `fatal:` 那行），无输出时退化为执行错误，
+  再退化为通用「git 命令失败」；超长按字符截断（160）并补 `…`，避免一条报错冲掉清单本身。
+- **空段不打印**：纯成功只打「成功仓库」、纯失败只打「失败仓库」，不会留下空标题。
+- **重复可接受**：逐仓 `[OK]/[FAIL]` 行仍实时滚动（并行时按完成顺序），清单在结尾再列一次——
+  两者用途不同（过程可见性 vs 结论快照）。
 
 ---
 
