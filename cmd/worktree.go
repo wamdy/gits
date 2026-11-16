@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -150,6 +151,109 @@ func worktreeMemberPaths(rootDir string, repos []repo.RepositoryInfo) []string {
 		paths[i] = filepath.Join(rootDir, dirName)
 	}
 	return paths
+}
+
+// ---------------------------------------------------------------- 同构布局（#1434）
+
+// 两种落位口径。flat 是缺省且**永远**是缺省：不给 --layout 时行为与 #1064 终态逐字一致。
+const (
+	layoutFlat   = "flat"
+	layoutMirror = "mirror"
+)
+
+// normalizeLayout 将命令行取值收敛为内部口径：
+// 空串与 flat 都归一成 flat（**不落 layout 键**，保持配置 diff 零噪音），
+// mirror 原样保留；其余取值报错——布局口径不允许悄悄变（与 #1064「不猜各仓 HEAD」同一条纪律）。
+func normalizeLayout(flagValue string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(flagValue))
+	switch v {
+	case "", layoutFlat:
+		return layoutFlat, nil
+	case layoutMirror:
+		return layoutMirror, nil
+	default:
+		return "", errors.New(i18n.T("worktree_layout_unknown", strings.TrimSpace(flagValue)))
+	}
+}
+
+// defaultMirrorRoot 缺省镜像基准＝配置基目录的**父目录**（不是它自己）。
+// 原因在现网就能看到：`.gits` 位于 appollo 根，取它当基准会让 appollo 自己 rel=="."，
+// 撞上集合根本身；取父目录后 appollo → `<集合根>/appollo`、
+// gits → `<集合根>/appollo/code/tools/gits`，与磁盘 1:1 且不需要任何特例分支。
+func defaultMirrorRoot() string {
+	return filepath.Dir(config.ConfigBaseDir())
+}
+
+// resolveMirrorRoot --mirror-root 覆盖缺省基准；空值走缺省。
+func resolveMirrorRoot(flagValue string) string {
+	v := strings.TrimSpace(flagValue)
+	if v == "" {
+		return filepath.Clean(defaultMirrorRoot())
+	}
+	if abs, err := filepath.Abs(filepath.FromSlash(v)); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(filepath.FromSlash(v))
+}
+
+// mirrorMemberPaths 按磁盘布局算成员目录：`<集合根>/Rel(基准, 仓绝对路径)`。
+//
+// 与 flat 一样是**纯计算、零副作用**；越界不静默降级，而是逐仓点名进 issues
+// （全量收集，不首错即返——对齐 precheckWorktreeAdd 的点名纪律）：
+//   - 跨卷/无法相对化（filepath.Rel 报错）；
+//   - 仓不在基准之下（rel 以 ".." 开头）；
+//   - 仓正好等于基准（rel == "."，会撞在集合根本身上）。
+//
+// 被拒成员的 paths[i] 留空串：调用方靠 issues 判成败，空路径也让它不可能被误用。
+func mirrorMemberPaths(setRoot, mirrorRoot string, repos []repo.RepositoryInfo) (paths []string, issues []string) {
+	paths = make([]string, len(repos))
+	for i, r := range repos {
+		label := repo.DisplayLabel(r.ID, r.Name, "")
+		rel, err := filepath.Rel(mirrorRoot, filepath.Clean(filepath.FromSlash(r.Path)))
+		switch {
+		case err != nil:
+			issues = append(issues, i18n.T("worktree_mirror_cross_volume", label, mirrorRoot))
+			continue
+		case rel == ".":
+			issues = append(issues, i18n.T("worktree_mirror_root_is_repo", label, mirrorRoot, filepath.Dir(mirrorRoot)))
+			continue
+		case rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)):
+			issues = append(issues, i18n.T("worktree_mirror_out_of_root", label, mirrorRoot))
+			continue
+		}
+		paths[i] = filepath.Join(setRoot, filepath.FromSlash(rel))
+	}
+	return paths, issues
+}
+
+// worktreeBuildOrder 返回执行顺序（repos/paths 的索引切片）。
+//
+// mirror 布局下**必须先建祖先再建后代**：实测反序时 git 对祖先直接
+// `fatal: '<path>' already exists` 退 128，会留下半个集合并触发回滚链。
+// 深度用「目标路径的分隔符个数」度量：同一集合的成员共享同一根目录前缀，
+// 因此绝对路径的分隔符数与相对深度只差一个常量，排序结果等价，
+// 无需把 setRoot 再传进来（多一个参数就多一个传错的机会）。
+// 同深度按仓 ID 升序，保证同一命令多次运行的顺序可 diff（沿 #1276 的选择索引归位口径）。
+// flat 布局返回恒等切片——重排只服务镜像，不许连带改掉扁平集合的执行与输出顺序。
+func worktreeBuildOrder(repos []repo.RepositoryInfo, paths []string, mirror bool) []int {
+	order := make([]int, len(paths))
+	for i := range order {
+		order[i] = i
+	}
+	if !mirror {
+		return order
+	}
+	depth := func(p string) int {
+		return strings.Count(filepath.ToSlash(p), "/")
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		da, db := depth(paths[order[a]]), depth(paths[order[b]])
+		if da != db {
+			return da < db
+		}
+		return repos[order[a]].ID < repos[order[b]].ID
+	})
+	return order
 }
 
 // ---------------------------------------------------------------- 阶段 A 预检
