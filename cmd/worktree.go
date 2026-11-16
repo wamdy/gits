@@ -454,16 +454,118 @@ func worktreeMemberViews(set config.WorktreeSet, allRepos []config.Repository) (
 	return labels, paths
 }
 
-// findDirtyWorktreeMembers 逐成员看 `git status --porcelain`，返回脏成员的标签清单。
+// worktreeRemovalOrder 返回拆除执行顺序（paths 的索引切片）：**深度降序**（后代先），
+// 同深度按登记序，所以 flat（成员互为兄弟）恒等——既有 remove 的行序与行为逐字不变。
+//
+// 为什么不能就用 add 侧的 `worktreeBuildOrder` 倒序：那是**本次调用的执行序**的倒影，
+// 而 remove 拿到的是集合登记序，登记序与深度无关（用户当时手输 `-r 2,1` 就反了）。
+// 实测的形状是：先拆祖先会把整棵后代目录连带删掉，后代随即 `chdir … cannot find the path`，
+// 失败计数 >0 ⇒ 集合登记原地保留、`.git/worktrees` 里挂 prunable 残项（评审 B1）。
+func worktreeRemovalOrder(paths []string) []int {
+	order := make([]int, len(paths))
+	for i := range order {
+		order[i] = i
+	}
+	depth := func(p string) int { return strings.Count(filepath.ToSlash(p), "/") }
+	sort.SliceStable(order, func(a, b int) bool {
+		return depth(paths[order[a]]) > depth(paths[order[b]])
+	})
+	return order
+}
+
+// worktreeNestedMembers 算出每个成员**内部**还包着哪些同集合成员，返回 git status 口径的
+// 相对路径（`/` 分隔、无尾斜杠），索引与 paths 对齐。兄弟目录、集合外的路径都不会进清单。
+//
+// 这份清单只服务一件事：脏判据的豁免（见 findDirtyWorktreeMembers）。
+// flat 集合下恒为空 ⇒ 拆除侧对既有形状零影响。
+func worktreeNestedMembers(paths []string) map[int][]string {
+	nested := make(map[int][]string, len(paths))
+	for i, p := range paths {
+		base := filepath.Clean(p)
+		for j, q := range paths {
+			if i == j {
+				continue
+			}
+			rel, err := filepath.Rel(base, filepath.Clean(q))
+			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue // 不含（跨卷/在外面/自身）：不豁免任何东西
+			}
+			nested[i] = append(nested[i], filepath.ToSlash(rel))
+		}
+	}
+	return nested
+}
+
+// findDirtyWorktreeMembers 逐成员看未提交改动，返回脏成员的标签清单（调用方据此整组中止）。
 // 路径已不存在的成员不算脏（git 自身会拒绝拆除，由 remove 的结果行点名）。
-func findDirtyWorktreeMembers(labels, paths []string) []string {
+//
+// nested（worktreeNestedMembers 的结果）是**镜像集合的结构性豁免**：后代成员目录就长在祖先
+// 工作树里，祖先的 status 必然把它记成未跟踪内容——那不是「用户有改动没提交」，
+// 而是集合自己的落位形状。不豁免它，嵌套镜像集合在脏判据这一关就被整组中止，根本走不到拆除。
+// 豁免口径严格限定为「未跟踪(`??`) 且路径逐条精确等于某后代成员」；
+// 其余任何状态（含同目录里的真未跟踪文件、已跟踪文件的改动、暂存内容）照旧判脏。
+// 有豁免项的成员才走 `status --porcelain -uall -z`（逐文件枚举，成本更高），
+// 没有豁免项的成员继续走默认口径——flat 集合的判据与成本都不变。
+func findDirtyWorktreeMembers(labels, paths []string, nested map[int][]string) []string {
 	var dirty []string
 	for i, p := range paths {
-		if git.GetStatus(p) != "" {
+		if len(nested[i]) == 0 {
+			if git.GetStatus(p) != "" {
+				dirty = append(dirty, labels[i])
+			}
+			continue
+		}
+		if statusIgnoringMembers(p, nested[i]) {
 			dirty = append(dirty, labels[i])
 		}
 	}
 	return dirty
+}
+
+// statusIgnoringMembers 判断该工作树是否有「不算集合结构」的改动。
+// 解析 `--porcelain -uall -z`：NUL 分隔，每条形如 `?? tools/inner/` 或 ` M path`。
+// 只跳过 `?? ` 且去掉尾斜杠后精确命中豁免清单的条目；解析不动的任何其它条目一律算脏（宁可多判，
+// 不可把用户改动当结构拆掉）。
+func statusIgnoringMembers(dir string, exempt []string) bool {
+	skip := make(map[string]bool, len(exempt))
+	for _, rel := range exempt {
+		skip[strings.TrimSuffix(filepath.ToSlash(rel), "/")] = true
+	}
+	out := git.StatusUntrackedAll(dir)
+	if out == "" {
+		return false // 命令失败时 Output 为空：交给后续 git worktree remove 自己报错，不在这里替它判定
+	}
+	for _, rec := range strings.Split(out, "\x00") {
+		rec = strings.TrimRight(rec, "\r\n")
+		if rec == "" {
+			continue
+		}
+		if rel, ok := strings.CutPrefix(rec, "?? "); ok {
+			if skip[strings.TrimSuffix(filepath.ToSlash(rel), "/")] {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// teardownWorktreeSet 拆除集合全部成员：按 worktreeRemovalOrder 后代先拆，逐个
+// `git worktree remove` 并打结果行，返回失败个数。**永不删分支**（AC-03.4），
+// `force` 只透传给 git；不碰配置、不落盘——登记清理与 Save 由调用方负责
+// （评审 BLOCK-2 的条目回收口径也留在调用方，避免这里出现第二份生命周期判断）。
+// 脏判据同样由调用方在 review 之前执行（人类门控必须排在任何写盘动作前面）。
+func teardownWorktreeSet(labels, paths []string, force bool) int {
+	failed := 0
+	for _, idx := range worktreeRemovalOrder(paths) {
+		result := git.WorktreeRemove(paths[idx], force)
+		result.RepoPath = paths[idx] // 结果行回显被拆除的 worktree 路径（git 在归属源树目录执行）
+		ui.PrintGitResult(result, labels[idx])
+		if !result.Success {
+			failed++
+		}
+	}
+	return failed
 }
 
 // pruneWorktreeSets 只清登记（AC-03.5）：路径不存在的成员移出集合，成员清空的集合整组删除。
@@ -670,8 +772,10 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) {
 	labels, paths := worktreeMemberViews(set, cfg.Repositories)
 
 	// AC-03.3：任一成员脏 → 整组中止（一个都不拆）并点名脏成员；只有显式 --force 才透传给 git。
+	// 豁免清单（同集合后代目录）在这里传进去：镜像集合的祖先必然把后代记成未跟踪内容，
+	// 不豁免就是「结构冒充改动」，整组永远拆不掉（评审 B1）。
 	if !wtForce {
-		if dirty := findDirtyWorktreeMembers(labels, paths); len(dirty) > 0 {
+		if dirty := findDirtyWorktreeMembers(labels, paths, worktreeNestedMembers(paths)); len(dirty) > 0 {
 			exitOnError(fmt.Errorf("%s", i18n.T("worktree_dirty_abort", strings.Join(dirty, ", "))))
 		}
 	}
@@ -683,16 +787,8 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 逐个拆除；永不删分支（AC-03.4：不调 git branch -D、不传任何删分支参数）。
-	failed := 0
-	for i := range paths {
-		result := git.WorktreeRemove(paths[i], wtForce)
-		result.RepoPath = paths[i] // 结果行回显被拆除的 worktree 路径（git 在主仓目录执行）
-		ui.PrintGitResult(result, labels[i])
-		if !result.Success {
-			failed++
-		}
-	}
+	// 逐个拆除（后代先，见 worktreeRemovalOrder）；永不删分支（AC-03.4：不调 git branch -D、不传任何删分支参数）。
+	failed := teardownWorktreeSet(labels, paths, wtForce)
 	if failed > 0 {
 		// 只走 exitOnError 一条出口（评审 S-06）：先前额外 PrintMessage 同一句话会打两遍。
 		exitOnError(fmt.Errorf("%s", i18n.T("worktree_remove_failed", name, failed)))

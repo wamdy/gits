@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -272,7 +273,8 @@ func TestFindDirtyWorktreeMembers(t *testing.T) {
 
 	labels := []string{"[1] repo-a", "[2] repo-b"}
 	paths := []string{wtA, wtB}
-	dirty := findDirtyWorktreeMembers(labels, paths)
+	// 两个成员互为兄弟（flat 形状）→ 豁免清单为空，判据与 #1064 终态逐字相同。
+	dirty := findDirtyWorktreeMembers(labels, paths, worktreeNestedMembers(paths))
 	if len(dirty) != 1 || dirty[0] != "[2] repo-b" {
 		t.Fatalf("脏成员清单应只点名 [2] repo-b，实得 %q", dirty)
 	}
@@ -670,5 +672,142 @@ func TestCreateWorktreesAncestorFirstAndPrintsBySelection(t *testing.T) {
 		t.Error("反序（深先浅后）应被 git 拒绝并点名失败成员，实得零失败——顺序红线失去依据")
 	} else if !strings.Contains(out2, "[1] a") {
 		t.Errorf("失败结果行应点名浅层成员 a，实得:\n%s", out2)
+	}
+}
+
+// TestWorktreeRemovalOrderDescendantsFirst 是评审 B1 的顺序钉：
+// 镜像集合按登记（＝选择）序拆除时，先拆祖先会把整棵后代目录连带删掉，
+// 后代随即 `chdir … cannot find the path`，集合登记留在原地、`.git/worktrees` 里挂 prunable。
+// 实测还证明「倒序」不够——必须**深度降序**，因为登记序与深度无关（用户手输 `-r 2,1` 就反了）。
+func TestWorktreeRemovalOrderDescendantsFirst(t *testing.T) {
+	root := filepath.Join("D:", "wt", "demo")
+	paths := []string{
+		filepath.Join(root, "proj", "tools", "sub"), // 登记序 0：最深
+		filepath.Join(root, "proj"),                 // 登记序 1：最浅（祖先）
+		filepath.Join(root, "proj", "tools", "inner"),
+	}
+	order := worktreeRemovalOrder(paths)
+	want := []int{0, 2, 1} // sub 与 inner 同深度 → 按登记序（0 先于 2），祖先 proj 最后
+	if len(order) != 3 || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] {
+		t.Errorf("removal order = %v, want %v（后代先、同深度按登记序、祖先最后）", order, want)
+	}
+}
+
+// TestWorktreeRemovalOrderFlatIsIdentity 钉住 flat 不被拆除侧改动波及：
+// 扁平成员互为兄弟（同深度），顺序必须仍是登记序，否则既有 remove 的输出行序会漂。
+func TestWorktreeRemovalOrderFlatIsIdentity(t *testing.T) {
+	root := filepath.Join("D:", "wt", "demo")
+	paths := []string{filepath.Join(root, "a"), filepath.Join(root, "b"), filepath.Join(root, "c")}
+	order := worktreeRemovalOrder(paths)
+	for i, idx := range order {
+		if idx != i {
+			t.Fatalf("flat removal order = %v, want 恒等 [0 1 2]", order)
+		}
+	}
+}
+
+// TestWorktreeNestedMembersRelPaths 钉脏判据豁免的输入：每个成员内部还包着哪些同集合成员，
+// 且必须是 **git status 口径的相对路径**（/ 分隔、无尾斜杠）——豁免靠精确比对，
+// 传绝对路径或带尾斜杠都等于没豁免。兄弟目录（不是成员）不得进清单。
+func TestWorktreeNestedMembersRelPaths(t *testing.T) {
+	root := filepath.Join("D:", "wt", "demo")
+	proj := filepath.Join(root, "proj")
+	inner := filepath.Join(proj, "tools", "inner")
+	sub := filepath.Join(proj, "tools", "sub")
+	outside := filepath.Join("D:", "elsewhere")
+
+	got := worktreeNestedMembers([]string{proj, inner, sub, outside})
+	if len(got[0]) != 2 {
+		t.Fatalf("proj 的内部成员 = %q, want 2 条", got[0])
+	}
+	sort.Strings(got[0])
+	if got[0][0] != "tools/inner" || got[0][1] != "tools/sub" {
+		t.Errorf("proj 的内部成员 = %q, want [tools/inner tools/sub]（/ 分隔、无尾斜杠）", got[0])
+	}
+	for _, i := range []int{1, 2, 3} {
+		if len(got[i]) != 0 {
+			t.Errorf("成员 %d 不含任何同集合后代，不该有豁免项，实得 %q", i, got[i])
+		}
+	}
+}
+
+// TestFindDirtyWorktreeMembersIgnoresNestedMember 是 B1 的另一半：
+// 只修顺序不修脏判据，嵌套镜像集合**仍然拆不掉**——因为脏判据在任何拆除动作之前跑，
+// 祖先此刻必然把后代目录记成未跟踪内容（实测默认口径 `?? tools/`，-uall 口径 `?? tools/inner/`）。
+// 三条断言：① 传豁免 → 祖先不判脏；② 不传豁免 → 祖先判脏（证明是豁免在起作用，不是判据失效）；
+// ③ 祖先里再放一个真未跟踪文件 → 即便有豁免也照判脏（豁免不许吞真改动）。
+func TestFindDirtyWorktreeMembersIgnoresNestedMember(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	outer := newMainRepo(t, filepath.Join(root, "outer"), "harness/demo")
+	innerSrc := newMainRepo(t, filepath.Join(root, "outer", "tools", "inner"), "harness/demo")
+
+	setRoot := filepath.Join(root, "wt", "demo")
+	wtOuter := filepath.Join(setRoot, "outer")
+	wtInner := filepath.Join(wtOuter, "tools", "inner")
+	gitIn(t, outer, "worktree", "add", "-q", wtOuter, "harness/demo")
+	gitIn(t, innerSrc, "worktree", "add", "-q", wtInner, "harness/demo")
+
+	labels := []string{"[1] outer@demo", "[2] inner@demo"}
+	paths := []string{wtOuter, wtInner}
+
+	nested := worktreeNestedMembers(paths)
+	if got := findDirtyWorktreeMembers(labels, paths, nested); len(got) != 0 {
+		t.Errorf("嵌套成员不该让祖先判脏，实得 %q", got)
+	}
+	// ② 不传豁免＝既有口径：祖先被后代目录顶成脏（这条同时证明 flat 集合行为未被改动波及）
+	if got := findDirtyWorktreeMembers(labels, paths, nil); len(got) != 1 || got[0] != labels[0] {
+		t.Errorf("无豁免时应点名脏祖先 %q，实得 %q", labels[0], got)
+	}
+	// ③ 真未跟踪文件必须照判脏
+	realDirty := filepath.Join(wtOuter, "notes.txt")
+	if err := os.WriteFile(realDirty, []byte("n\n"), 0o644); err != nil {
+		t.Fatalf("write notes.txt: %v", err)
+	}
+	if got := findDirtyWorktreeMembers(labels, paths, nested); len(got) != 1 || got[0] != labels[0] {
+		t.Errorf("祖先里的真未跟踪文件必须判脏（豁免不许吞真改动），实得 %q", got)
+	}
+	if err := os.Remove(realDirty); err != nil {
+		t.Fatalf("remove notes.txt: %v", err)
+	}
+}
+
+// TestTeardownNestedMirrorSetSucceeds 是 B1 的收口钉：走**命令实际用的那套组合**
+// （脏判据 + teardownWorktreeSet），而不是测试自己手搓倒序循环。
+// 场景完全照评审复现：外层仓 + 其内部子目录仓的镜像集合，登记序是「祖先在前」。
+func TestTeardownNestedMirrorSetSucceeds(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	outer := newMainRepo(t, filepath.Join(root, "outer"), "harness/demo")
+	innerSrc := newMainRepo(t, filepath.Join(root, "outer", "tools", "inner"), "harness/demo")
+
+	setRoot := filepath.Join(root, "wt", "demo")
+	wtOuter := filepath.Join(setRoot, "outer")
+	wtInner := filepath.Join(wtOuter, "tools", "inner")
+	gitIn(t, outer, "worktree", "add", "-q", wtOuter, "harness/demo")
+	gitIn(t, innerSrc, "worktree", "add", "-q", wtInner, "harness/demo")
+
+	labels := []string{"[1] outer@demo", "[2] inner@demo"}
+	paths := []string{wtOuter, wtInner} // 登记序＝祖先在前，正是踩坑的形状
+
+	if dirty := findDirtyWorktreeMembers(labels, paths, worktreeNestedMembers(paths)); len(dirty) > 0 {
+		t.Fatalf("脏判据把嵌套结构误判成未提交改动，整组会被中止：%q", dirty)
+	}
+	if failed := teardownWorktreeSet(labels, paths, false); failed != 0 {
+		t.Errorf("拆除嵌套镜像集合应全部成功，实得失败 %d 个", failed)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s 未被拆除（目录仍在）", p)
+		}
+	}
+	// 永不删分支（AC-03.4 红线在拆除侧的复验）+ 登记回收（不留 prunable）。
+	for _, src := range []string{outer, innerSrc} {
+		if out := gitIn(t, src, "branch", "--list", "harness/demo"); !strings.Contains(out, "harness/demo") {
+			t.Errorf("%s 的 harness/demo 分支在拆除后消失", src)
+		}
+		if n := worktreeListCount(t, src); n != 1 {
+			t.Errorf("%s 拆除后 git worktree list = %d 条, want 1（残留登记）", src, n)
+		}
 	}
 }

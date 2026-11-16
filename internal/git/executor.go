@@ -64,6 +64,22 @@ func GetStatus(path string) string {
 	return result.Output
 }
 
+// StatusUntrackedAll 返回 `git status --porcelain -uall -z` 的原始输出（NUL 分隔）。
+//
+// 为什么需要第二个口径而不是把 GetStatus 改掉：默认口径会把**只含未跟踪内容的目录整体折叠**
+// 成一条 `?? tools/`，而同集合的镜像后代成员可能落在 `tools/inner/`——折叠后的条目
+// 无法与成员路径精确比对，「这条未跟踪是不是集合自己的结构」就无从判断。
+// `-uall` 关掉目录折叠，嵌套仓作为独立仓固定报成一条 `?? tools/inner/`（实测），
+// 于是豁免只需精确匹配；真实未跟踪文件仍各自成条（实测 `?? tools/notes.txt` 照报），
+// 豁免不会吞掉真改动。`-z` 则免掉 git 对非 ASCII / 空格的引号转义，解析无需猜。
+//
+// 代价：`-uall` 逐文件枚举未跟踪内容，比默认口径贵，因此**只在成员内部确实包着其它成员时**才调用
+// （见 cmd/worktree.go 的 findDirtyWorktreeMembers），flat 集合继续走 GetStatus 的既有成本。
+func StatusUntrackedAll(path string) string {
+	result := Execute(path, "status", "--porcelain", "-uall", "-z")
+	return result.Output
+}
+
 // BranchExists 检查 repoPath 仓库是否存在匹配 pattern 的分支（本地或远程任一）。
 // pattern 支持 glob（* / ?），由 git for-each-ref 的 refname 模式实现。
 func BranchExists(repoPath string, pattern string) (bool, error) {

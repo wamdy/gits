@@ -194,11 +194,14 @@ func TestE2EMirrorSetFullChain(t *testing.T) {
 		}
 	}
 
-	// ⑤ 整体拆除：按 created 倒序（最深的先拆，git 的父子登记才不会挡）。
-	for i := len(created) - 1; i >= 0; i-- {
-		if res := git.WorktreeRemove(created[i], false); !res.Success {
-			t.Fatalf("拆除 %s 失败: %v\n%s", created[i], res.Error, res.Output)
-		}
+	// ⑤ 整体拆除：走**命令实际用的那套组合**（脏判据 + teardownWorktreeSet），
+	// 不再由测试自己倒序循环——第一版就是这样把 B1 绕过去的：测试全绿，而 `worktree remove`
+	// 对嵌套镜像集合常态拆不掉。组合必须与 runWorktreeRemove 一致，否则端到端等于测另一个实现。
+	if dirty := findDirtyWorktreeMembers(labels, paths, worktreeNestedMembers(paths)); len(dirty) > 0 {
+		t.Fatalf("脏判据把嵌套结构误判成未提交改动，整组会被中止：%q", dirty)
+	}
+	if failed := teardownWorktreeSet(labels, paths, false); failed != 0 {
+		t.Errorf("拆除嵌套镜像集合应全部成功，实得失败 %d 个", failed)
 	}
 	for _, src := range []string{proj, inner, sub} {
 		// 永不删分支是 AC-03.4 红线：拆完分支必须还在，否则整条流水线的提交就没了。
