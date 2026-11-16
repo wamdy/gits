@@ -143,14 +143,70 @@ func Classify(path string) GitEntryKind {
 	return KindRepo
 }
 
-// MainRepoPath 返回 linked worktree 所属主仓路径（common-dir 的父目录）。
-// 仅 KindLinkedWorktree 有意义：普通仓库 / submodule / 非 git 目录一律返回空串。
+// MainRepoPath 返回 linked worktree 的**归属源树**目录（仅 KindLinkedWorktree 有意义；
+// 普通仓库 / submodule / 非 git 一律空串）。它是两处口径的唯一来源：
+// `← 主仓` 归属列（经 repo.DetectWorktreeOf / discover）与 `WorktreeRemove` 的执行目录。
+//
+// 解析顺序固定三步，判据全部取 git 自身输出或 git 写在自己库里的配置值：
+//
+//	① GitDirs：git-dir == common-dir → 空串（源树本身，不是 linked worktree）。
+//	② 读 common 库 config 文件里的 core.worktree（实测 E12：submodule 派生的 worktree 形如
+//	   `../../../../../code/tools/sub`，相对 common-dir），解析为 src 后做**源树双向校验**：
+//	   Classify(src) 必须是源树形态（KindRepo / KindSubmodule），且 src 的 common-dir
+//	   与本 worktree 的 common-dir 相同。两条都过才采用——只比"读到了值"会把
+//	   用户手工写坏的值、或指向另一个库的值当成归属（读取姿势的两个必须项见 commonConfigValue）。
+//	③ 无该键 / 校验不过 → filepath.Dir(commonDir)（E14 实测普通仓不触发新判据，行为逐字不变）。
+//
+// 为什么不看 `--show-superproject-working-tree`：镜像布局把 worktree 嵌在父 worktree 的工作树里时，
+// 它答的是"我住在谁的工作树内"（实测返回父 worktree 而非 submodule 源树），
+// 而归属要的是"谁拥有这条登记"——即能合法跑 `git worktree list/remove` 的那个目录（E15）。
+// 已知局限：源树被手工搬走后 core.worktree 失效，校验不过即退回第 ③ 步的假路径，
+// 此时 remove 会失败（可观察），本函数不做反查恢复。
 func MainRepoPath(path string) string {
 	gitDir, commonDir, ok := GitDirs(path)
 	if !ok || samePath(gitDir, commonDir) {
 		return ""
 	}
+	if v := commonConfigValue(path, commonDir, "core.worktree"); v != "" {
+		if src := absFrom(commonDir, v); isSourceTreeOf(src, commonDir) {
+			return src
+		}
+	}
 	return filepath.Dir(commonDir)
+}
+
+// commonConfigValue 读取某 git 库 config 文件里的配置值；取不到返回空串。
+//
+// 两个"必须"都是实测踩出来的（git 2.54）：
+//   - **必须走 `--file <commonDir>/config`**：`git -C <commonDir> config --get core.worktree`
+//     要靠 cwd 发现仓库，而要读的值本身就是发现过程的输入——值被写坏后该命令直接 fatal、
+//     读回空串，于是"值坏掉"与"没有这个键"两种情况无法区分，源树校验分支永远走不到（假绿）。
+//   - **必须以被查询的那个 worktree 为 cwd**（而不是 common 库目录、也不是源树目录）：
+//     linked worktree 的 `.git` 文件已把它钉在自己的 per-worktree 库里，发现过程不会去 chdir
+//     `core.worktree`；反之在源树或库目录里跑，坏值会让 git 在解析阶段就 fatal。
+//
+// 解析仍全部交给 git（读它自己写的文件），因此不违反 ADR-150"判据取 git 自身输出"。
+func commonConfigValue(fromWorktree, commonDir, key string) string {
+	res := Execute(fromWorktree, "config", "--file", filepath.Join(commonDir, "config"), "--get", key)
+	if !res.Success {
+		return ""
+	}
+	return strings.TrimSpace(res.Output)
+}
+
+// isSourceTreeOf 判断 candidate 是否为归属于 commonDir 的**源树**
+// （git-dir == common-dir 的形态，即普通仓或 submodule 源，而不是另一个 linked worktree）。
+func isSourceTreeOf(candidate, commonDir string) bool {
+	if candidate == "" {
+		return false
+	}
+	switch Classify(candidate) {
+	case KindRepo, KindSubmodule:
+	default:
+		return false
+	}
+	_, candCommon, ok := GitDirs(candidate)
+	return ok && samePath(candCommon, commonDir)
 }
 
 // WorktreeAdd 在 repoPath 仓库为已存在的分支 branch 创建一个 linked worktree 到 worktreePath。
