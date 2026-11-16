@@ -556,10 +556,23 @@ func statusIgnoringMembers(dir string, exempt []string) bool {
 // （评审 BLOCK-2 的条目回收口径也留在调用方，避免这里出现第二份生命周期判断）。
 // 脏判据同样由调用方在 review 之前执行（人类门控必须排在任何写盘动作前面）。
 func teardownWorktreeSet(labels, paths []string, force bool) int {
+	nested := worktreeNestedMembers(paths)
 	failed := 0
 	for _, idx := range worktreeRemovalOrder(paths) {
 		result := git.WorktreeRemove(paths[idx], force)
 		result.RepoPath = paths[idx] // 结果行回显被拆除的 worktree 路径（git 在归属源树目录执行）
+		// 真仓实测（appollo + wiki + code/tools/archify-viewer）：后代成员先拆掉后，若它的路径在祖先
+		// 索引里是**已跟踪的 gitlink**，祖先的 status 会多出 ` D <rel>`；git 因此拒绝无 --force 拆除，
+		// 于是整组只拆掉一半、集合登记原样留着（人工门抓到的缺陷）。
+		// 那份脏必然是「本次拆除的产物」——脏判据在拆除前已放行全部成员，用户不存在未提交改动；
+		// 故只对**确有本集合后代**的成员升级 --force，并把这层意图打出来（不静默强拆）。
+		if !result.Success && !force && len(nested[idx]) > 0 {
+			ui.PrintMessage(i18n.T("worktree_remove_nested_gitlink", paths[idx]))
+			if retry := git.WorktreeRemove(paths[idx], true); retry.Success {
+				retry.RepoPath = paths[idx]
+				result = retry
+			}
+		}
 		ui.PrintGitResult(result, labels[idx])
 		if !result.Success {
 			failed++

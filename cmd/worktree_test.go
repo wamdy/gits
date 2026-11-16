@@ -833,3 +833,73 @@ func resultLineOf(out, label string) (int, error) {
 	}
 	return -1, errors.New("label not found in output: " + label)
 }
+
+// TestTeardownNestedOverTrackedGitlinkEscalatesForce 是真仓人工门（2026-11-16，`appollo` +
+// `wiki` + `code/tools/archify-viewer`）抓到的缺陷的回归钉。
+//
+// 机制：镜像布局把后代成员放在祖先仓**索引里已跟踪的 gitlink 路径**上。后代先拆 → 目录消失 →
+// 祖先 `git status` 多出 ` D <rel>`。那不是用户的未提交改动（脏判据在拆除前已放行全部成员），
+// 而是本次拆除的产物；但 `git worktree remove` 不带 `--force` 会因它拒绝 ⇒ **部分拆除**
+// （真仓实测 3 个成员只拆掉 2 个，集合登记原样留着）。
+//
+// 两段断言：① 机制成立（拆掉后代后祖先 status 出现 ` D tools/sub`）；
+// ② 修复生效（teardownWorktreeSet 对「确有后代」的成员升级 --force，整组零失败）。
+func TestTeardownNestedOverTrackedGitlinkEscalatesForce(t *testing.T) {
+	requireGit(t)
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	root := t.TempDir()
+	subSrc := newMainRepo(t, filepath.Join(root, "subsrc"), "harness/demo")
+	// 祖先仓：把 subSrc 加成 submodule 并提交 → 祖先索引里出现 `tools/sub` 这条 gitlink
+	outer := newMainRepo(t, filepath.Join(root, "outer"), "harness/demo")
+	if err := os.MkdirAll(filepath.Join(outer, "tools"), 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+	if out, err := tryGitIn(outer, "-c", "protocol.file.allow=always", "submodule", "add", "--",
+		"../subsrc", "tools/sub"); err != nil {
+		t.Fatalf("建不出真 submodule（本条依赖已跟踪 gitlink 的形状）: %v\n%s", err, out)
+	}
+	gitIn(t, outer, "commit", "-q", "-m", "add submodule")
+	// 目标分支必须**含**刚提交的 gitlink：newMainRepo 建的 harness/demo 还停在初始提交上，
+	// 挂在旧提交上的 worktree 不会把 tools/sub 当已跟踪路径（第一版就是因此机制断言没成立）。
+	gitIn(t, outer, "branch", "-f", "harness/demo", "HEAD")
+
+	setRoot := filepath.Join(root, "wt", "demo")
+	paths := []string{filepath.Join(setRoot, "outer"), filepath.Join(setRoot, "outer", "tools", "sub")}
+	labels := []string{"[1] outer@demo", "[2] sub@demo"}
+	gitIn(t, outer, "worktree", "add", "-q", paths[0], "harness/demo")
+	gitIn(t, subSrc, "worktree", "add", "-q", paths[1], "harness/demo")
+
+	// 前置：拆除前脏判据必须放行（否则本用例测的是另一条分支）
+	if dirty := findDirtyWorktreeMembers(labels, paths, worktreeNestedMembers(paths)); len(dirty) > 0 {
+		t.Fatalf("前置不成立：拆除前不该判脏，实得 %q", dirty)
+	}
+
+	// ① 机制：先拆后代，祖先 status 应出现 ` D tools/sub`
+	if res := git.WorktreeRemove(paths[1], false); !res.Success {
+		t.Fatalf("拆后代失败，机制断言无法进行: %v %s", res.Error, res.Output)
+	}
+	if st := git.GetStatus(paths[0]); !strings.Contains(st, "D tools/sub") {
+		t.Fatalf("机制不成立：拆掉后代后祖先 status 应含 ` D tools/sub`，实得:\n%s", st)
+	}
+	// 还原后代，让正式拆除从「两个成员都在」的干净状态开始
+	gitIn(t, subSrc, "worktree", "add", "-q", paths[1], "harness/demo")
+
+	// ② 修复：整组无 --force 拆除必须零失败（祖先升级 --force 并留痕）
+	if failed := teardownWorktreeSet(labels, paths, false); failed != 0 {
+		t.Fatalf("嵌套在已跟踪 gitlink 上的集合应整体拆除成功（祖先需升级 --force），实得失败 %d 个", failed)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s 未被拆除", p)
+		}
+	}
+	if n := worktreeListCount(t, outer); n != 1 {
+		t.Errorf("祖先仓 worktree list = %d 条, want 1（登记未回收）", n)
+	}
+	if out := gitIn(t, subSrc, "branch", "--list", "harness/demo"); !strings.Contains(out, "harness/demo") {
+		t.Error("拆除后分支消失——违反永不删分支红线")
+	}
+}
