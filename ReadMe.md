@@ -96,6 +96,8 @@ gits [全局选项] <命令> [参数]
 │   │   │   ├── -r, --repo     仓库选择（ID/区间/通配/名称/branch:/set:，与 -g 互斥）
 │   │   │   ├── --branch       worktree 分支（优先于配置 defaults.branch；两者都缺则报错，不猜各仓 HEAD）
 │   │   │   ├── --dir          worktree 根目录（缺省 <配置基目录>/.worktrees/<集合名>）
+│   │   │   ├── --layout       成员落位口径 flat（默认，压平在根下）| mirror（与磁盘布局同构）
+│   │   │   ├── --mirror-root  同构布局的镜像基准（缺省＝存放 .gits 的目录的父目录）
 │   │   │   └── -y, --yes      跳过执行前 review 确认
 │   │   ├── list [集合名]      列出集合与成员（`[ID] 名称 (检出分支) 路径`，目录消失标 missing）
 │   │   ├── remove <集合名>    拆除集合全部成员（任一脏即整组中止；永不删分支）
@@ -187,16 +189,35 @@ gits [全局选项] <命令> [参数]
 | `gits worktree add <集合名> -r <选择> --branch <分支>` | 为选中仓库各建一个 worktree 并登记为集合；落位 `<配置基目录>/.worktrees/<集合名>/<仓名>`。**必须显式给 `-r`（或 `-g`）**——不给时直接报错退出，不会退化成「全部登记仓库」 | `gits worktree add 20261104-demo -r 1,3 --branch harness/20261104-demo` |
 | `gits worktree add -r <选择> --branch <分支>` | 集合名缺省为分支名去掉 `harness/` 前缀后的 slug（同名集合已存在则拒绝，不覆盖） | `gits worktree add -r set:base --branch harness/x` |
 | `gits worktree add ... --dir <根>` | 覆盖默认根目录 | `gits worktree add demo -r 1-4 --branch dev --dir D:/wt/demo` |
-| `gits worktree list [集合名]` | 列出集合与成员：`[ID] 名称 (检出分支) 路径`，目录已消失的成员标 `missing` | `gits worktree list demo` |
+| `gits worktree add ... --layout mirror` | **同构落位**：成员按「仓库相对镜像基准的路径」放进集合根，目录树与磁盘 1:1（父目录段保留，同名仓不再靠加 ID 后缀区分） | `gits worktree add demo -r 1,2 --branch harness/x --layout mirror` |
+| `gits worktree add ... --mirror-root <基准>` | 覆盖镜像基准（缺省＝存放 `.gits` 的目录的**父目录**）。只给本旗标即视为 mirror；显式 `--layout flat` 配它则报矛盾（flat 不消费基准） | `gits worktree add demo -r 1,2 -b harness/x --mirror-root D:/ws` |
+| `gits worktree list [集合名]` | 列出集合与成员：`[ID] 名称 (检出分支) 路径`，目录已消失的成员标 `missing`；mirror 集合的标题额外显示 `布局: mirror, 镜像基准: …` | `gits worktree list demo` |
 | `gits worktree remove <集合名>` | 拆除全部成员后删除集合登记，并**回收 `add` 自动登记的仓库条目**；**任一成员脏即整组中止并点名**，**永不删分支** | `gits worktree remove demo` |
 | `gits worktree remove <集合名> --force` | 把 `--force` 透传给 `git worktree remove` 越过脏检查（只作用于 worktree 本身，仍不删分支） | `gits worktree remove demo --force` |
 | `gits worktree prune` | **只清登记**：路径不存在的成员移出集合、空集合删除，并回收这些成员对应的自动登记条目；不删磁盘目录、不调用 `git worktree prune` | `gits worktree prune` |
 
 `add` 的执行顺序：**阶段 A 预检（只读）→ 阶段 B 创建 → 阶段 C 登记**。
-- 预检逐项检查：submodule 排除、分支存在性（`--branch` > `defaults.branch`，两者都缺直接报错，不猜各仓 HEAD）、**该分支是否已被本仓的某个 worktree 检出**（同一分支 git 只能被一个 worktree 检出，最常见的踩点是缺省落到 `defaults.branch=main` 而 `main` 正检出在主仓——现在预检就点名，不再等到创建阶段失败再回滚）、目标路径是否被占用、成员是否重复。任一失败 → **一个 worktree 都不建**，逐仓点名（含缺分支仓的名字与它当前分支）并以非零码退出。
+- 预检逐项检查：分支存在性（`--branch` > `defaults.branch`，两者都缺直接报错，不猜各仓 HEAD）、**该分支是否已被本仓的某个 worktree 检出**（同一分支 git 只能被一个 worktree 检出，最常见的踩点是缺省落到 `defaults.branch=main` 而 `main` 正检出在主仓——现在预检就点名，不再等到创建阶段失败再回滚）、目标路径是否被占用、成员是否重复、仓库身份（非 git 目录点名拒绝；**submodule 源自 #1434 起放行**，未 init 的 submodule 判为非 git 仍拒绝）。任一失败 → **一个 worktree 都不建**，逐仓点名（含缺分支仓的名字与它当前分支）并以非零码退出。
+- mirror 布局的三条拒绝（仓不在基准之下、仓正好等于基准、与基准跨卷）**并入同一份预检点名清单、走同一「整组不建」出口**——绝不静默降级成 flat，也不首错即返（一次跑完把所有越界仓都列出来）。
+- **执行顺序**：mirror 下按「相对路径段数升序」创建（同深度按仓库 ID 升序），必须先建祖先再建后代——实测反序时 git 对祖先目录直接 `fatal: '<path>' already exists` 退 128。结果行仍按**选择索引**归位打印（与 flat 与 #1276 口径逐字一致），回滚按执行序倒序（最深的先回）。
 - 创建中途失败 → 只回滚**本次调用**新建的 worktree（内存记账路径清单），调用前既有集合与磁盘不受影响，并点名失败仓；不写集合登记。
 - 默认执行前 review 列出成员与目标路径，`-y` 跳过。
+- `--layout` 只接受 `flat`/`mirror`（大小写与空白收敛），其余取值在**仓库选择解析之前**就报错退出，不猜默认；`--dir` 与布局正交（前者定集合根，后者只定根内的相对结构）。
+- 集合登记会记下本次口径：mirror 集合写 `layout: "mirror"` 与绝对 `mirror_root`，flat 两键**不写**（存量配置零噪音）。
 - `gits worktree <未知子命令>` 报错并以非零码退出（不再静默打 help 后返回 0）；裸 `gits worktree` 仍打 help。
+
+**两种布局对照**（同一组仓：主仓 `appollo` 与子目录仓 `appollo/code/tools/gits`，基准取 `appollo` 的父目录）：
+
+| | `--layout flat`（缺省） | `--layout mirror` |
+|---|---|---|
+| 成员目录 | `<根>/demo/appollo`、`<根>/demo/gits` | `<根>/demo/appollo`、`<根>/demo/appollo/code/tools/gits` |
+| 目录名来源 | 仓库 `Name`（重名追加 `-<ID>`） | `Rel(镜像基准, 仓绝对路径)`，父目录段原样保留 |
+| 同名仓（不同父目录） | 必须靠 `-<ID>` 后缀区分 | 天然不冲突（父路径不同） |
+| 创建顺序 | 选择顺序 | 祖先优先（段数升序，同深度按 ID） |
+| 仓不在基准之下 | 不适用 | **整组拒绝**并逐仓点名，不降级成 flat |
+| 集合登记 | 不写 `layout` | `layout: "mirror"` + 绝对 `mirror_root` |
+
+镜像布局的意义在于「集合目录树 = 磁盘目录树」：需要跨仓相对路径的工程（模块按目录层级引用、构建脚本用 `../`）解开就能直接用，压平后这些相对引用全部失效。
 
 #### 6. 仓库打包（pack）
 
@@ -689,6 +710,22 @@ gits config normalize
 ```
 
 `worktree_sets` 为**可选键**（无集合时整键不写，`version` 仍是 `1.0.0`）：
+- `layout` / `mirror_root` 同为**可选键**（`omitempty`）：flat 集合两键都不写，因此存量配置一行不多、老版本读到含这两键的配置也只是忽略；mirror 集合写 `"layout": "mirror"` 与 `mirror_root`，后者与 `repositories[].path` 走同一相对化口径（内存恒绝对、落盘相对、跨盘退化为绝对），整目录搬迁不断链。mirror 集合长这样（成员路径带父目录段，这正是它与上面 flat 示例的唯一区别）：
+
+```json
+  "worktree_sets": [
+    {
+      "name": "20261116-mirror",
+      "branch": "harness/20261116-demo",
+      "layout": "mirror",
+      "mirror_root": "..",
+      "members": [
+        { "repo_id": 3, "path": ".worktrees/20261116-mirror/appollo" },
+        { "repo_id": 4, "path": ".worktrees/20261116-mirror/appollo/code/tools/gits" }
+      ]
+    }
+  ]
+```
 - `members[].repo_id` 指向 **worktree 目录自己的仓库条目**（示例中的 3/4，即 `worktree add` 自动登记的 `repo1@20261104-demo` 等），**不是**父仓条目 1/2——`-r set:` 靠它把命令投递到正确的 worktree 目录。
 - `members[].path` 与 `repositories[].path` 走同一相对化口径（相对 `.gits` 所在目录，读取解析为绝对路径，跨盘退化为绝对路径），整目录搬迁不断链。
 - 仓库条目里**不落** worktree 身份字段：linked worktree / submodule 由 git 运行时判定，配置与磁盘不漂移。
@@ -699,7 +736,10 @@ gits config normalize
 ### 已知限制
 - **老版本 gits 读新配置会丢集合**：旧版本能正常解析含 `worktree_sets` 的配置（未知键被忽略），但它任一写配置的操作都会整篇重写，`worktree_sets` 键随之丢失。带集合的配置请用本版本或更新版本。
 - **`branch:` 对同仓多 worktree 会全部命中**：同一主仓的多个 worktree 共享 refs，`branch:<pattern>` 的判据（`for-each-ref`）与该目录当前检出什么分支无关，因此按分支过滤会把该主仓的所有 worktree 一起选中。修复另立 GitLab 缺陷票 **#1067**；本期 `worktree list` / `set:` 给出的是集合成员身份，不受此影响。
-- **submodule 内不建 worktree**：判定为 submodule 的成员在 `worktree add` 预检阶段直接点名拒绝（`config scan` 也跳过 submodule），本期不支持。
+- **submodule 可作为 worktree 源（#1434 起）**：判定为 submodule 的成员在 `worktree add` 预检放行，`config scan` 也不再跳过它——两边过滤是成对撤除的（只放开一边就等于「支持一种选不进来的成员」）。未 `init` 的 submodule 两次 `rev-parse` 失败、判为非 git，仍按「不是 Git 仓库」点名拒绝。
+- **worktree 的归属源树解析依赖 git 自述的 `core.worktree`**：submodule 派生的 worktree 靠「共享 common 库里的 `core.worktree` + 源树双向校验」反查回源 submodule 工作树；`core.worktree` 缺失或失效时**退回** `filepath.Dir(commonDir)`，此时 `worktree remove` 会在该假路径上失败（报错可观察，不静默改判到别的候选）。两个已知触发形态：源 submodule 目录被手工搬走；以及用 `git init --separate-git-dir` 手工建的库——后者压根不写 `core.worktree`，只在「`.git` 是文件且 git-dir == common-dir」这条判据上与 submodule 等价（因此**不要**拿它当 submodule 的替身夹具做归属验证）。恢复办法：把源树搬回原位，或在 common 库里修正 `core.worktree`。
+- **镜像布局不提供「祖先豁免」特例分支**：基准必须是所有选中仓库的共同父目录（或它们的祖先）。仓库正好等于基准、不在基准之下、与基准跨卷三种情况一律整组拒绝并逐仓点名——静默降级成 flat 会让人以为同构生效了而实际没有。
+- **同构集合的成员目录嵌套时，拆除顺序由 git 的父子登记决定**：先建的祖先里已挂载后代，`git worktree remove` 由后代先回（gits 按执行序倒序回滚）；手工从磁盘删目录时请先删最深的。
 - **`prune` / `remove` 不碰磁盘与分支**：`prune` 只清理登记（不删目录、不调 `git worktree prune`）；`remove` 永不执行 `git branch -D`。手工删除 worktree 目录后，主仓 `.git/worktrees` 里的记录需由 git 自身处理（`git worktree list` 会标 `prunable`）。
 - **`pack` 只收常规文件**：symlink / junction / socket / fifo / device 一律**跳过并计数**（不解引用、不跟随），避免 `node_modules` 式链接翻倍与 worktree 目录成环；因此包内不保留符号链接。
 - **`pack` 压 linked worktree 不可独立使用**：worktree 的 `.git` 是 84 字节 `gitdir:` 指针文件，原样压入但不补主仓对象库（会在写入阶段点名提示）。要可迁移的仓库数据请压主仓，或走 `gits -r <选择> -- bundle create …`。
