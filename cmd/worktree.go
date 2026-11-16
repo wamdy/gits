@@ -710,8 +710,10 @@ func runWorktreeAdd(cmd *cobra.Command, args []string) {
 	// 布局口径随集合一起登记：`worktree list` / `config show` 要靠它区分同构与压平，
 	// 而 flat 两键全空（omitempty 零污染，存量配置文件一行不多）。
 	setLayout, setMirrorRoot := worktreeSetLayoutKeys(layout, mirrorRoot)
+	// Root 一并登记：成员增删（member add|remove）要拿它当落位锚点，
+	// 而集合根当初可能来自 --dir，事后无法从成员路径反推（mirror 尤其不行）。
 	set := config.WorktreeSet{Name: setName, Branch: branch, Layout: setLayout,
-		MirrorRoot: setMirrorRoot, Members: members}
+		MirrorRoot: setMirrorRoot, Root: rootDir, Members: members}
 	cfg.WorktreeSets = append(cfg.WorktreeSets, set)
 	if err := cfg.Save(); err != nil {
 		exitOnError(err)

@@ -30,11 +30,13 @@ func TestWorktreeSetLayoutRoundTripKeepsStoredForm(t *testing.T) {
 
 	cfg := NewDefaultConfig()
 	cfg.Repositories = append(cfg.Repositories, Repository{ID: 1, Path: main, Name: "appollo", Groups: []string{}})
+	setRoot := filepath.Join(base, ".worktrees", "demo")
 	cfg.WorktreeSets = []WorktreeSet{{
 		Name:       "demo",
 		Branch:     "harness/demo",
 		Layout:     "mirror",
 		MirrorRoot: mirrorRoot,
+		Root:       setRoot,
 		Members:    []WorktreeMember{{RepoID: 2, Path: member}},
 	}}
 	if err := cfg.Save(); err != nil {
@@ -51,6 +53,10 @@ func TestWorktreeSetLayoutRoundTripKeepsStoredForm(t *testing.T) {
 	if stored[0].MirrorRoot != ".." {
 		t.Errorf("stored mirror_root = %q, want 相对配置基目录的 %q", stored[0].MirrorRoot, "..")
 	}
+	// root 与成员路径同一套相对化口径：成员增删拿它当落位锚点，绝对路径落盘等于断掉搬迁。
+	if want := ".worktrees/demo"; stored[0].Root != want {
+		t.Errorf("stored root = %q, want %q", stored[0].Root, want)
+	}
 	// 同构布局的成员路径本就是多段相对路径，落盘口径与 flat 完全一致（不得被压平或改写）。
 	if want := ".worktrees/demo/appollo/code/tools/gits"; stored[0].Members[0].Path != want {
 		t.Errorf("stored member path = %q, want %q", stored[0].Members[0].Path, want)
@@ -59,6 +65,9 @@ func TestWorktreeSetLayoutRoundTripKeepsStoredForm(t *testing.T) {
 	loaded, err := Load()
 	if err != nil {
 		t.Fatalf("Load(): %v", err)
+	}
+	if got := loaded.WorktreeSets[0].Root; !sameDirForTest(got, setRoot) {
+		t.Errorf("loaded root = %q, want %q", got, setRoot)
 	}
 	gotRoot := loaded.WorktreeSets[0].MirrorRoot
 	if !filepath.IsAbs(gotRoot) {

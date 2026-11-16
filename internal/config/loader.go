@@ -39,6 +39,7 @@ type WorktreeSet struct {
 	Branch     string           `json:"branch"`
 	Layout     string           `json:"layout,omitempty"`
 	MirrorRoot string           `json:"mirror_root,omitempty"` // 仅 mirror：实际使用的镜像基准；读写与成员路径同一口径
+	Root       string           `json:"root,omitempty"`        // 集合根目录：成员增删的落位锚点；存量集合缺键（见 cmd/worktree_member.go 的派生规则）
 	Members    []WorktreeMember `json:"members"`
 }
 
@@ -188,6 +189,7 @@ func Load() (*Config, error) {
 	// MirrorRoot 缺键（老配置 / flat 集合）时 ResolvePath("") 返回 ""，不产生假基准。
 	for i := range cfg.WorktreeSets {
 		cfg.WorktreeSets[i].MirrorRoot = ResolvePath(cfg.WorktreeSets[i].MirrorRoot)
+		cfg.WorktreeSets[i].Root = ResolvePath(cfg.WorktreeSets[i].Root)
 		for j := range cfg.WorktreeSets[i].Members {
 			cfg.WorktreeSets[i].Members[j].Path = ResolvePath(cfg.WorktreeSets[i].Members[j].Path)
 		}
@@ -218,6 +220,11 @@ func (c *Config) Save() error {
 		for i, set := range c.WorktreeSets {
 			if set.MirrorRoot != "" {
 				set.MirrorRoot = StoredPath(set.MirrorRoot)
+			}
+			// 集合根与成员路径同一口径：漏一处就会让搬迁后的集合根指向老位置，
+			// 而成员增删正是拿它当落位锚点（新成员会建到旧树上）。
+			if set.Root != "" {
+				set.Root = StoredPath(set.Root)
 			}
 			set.Members = make([]WorktreeMember, len(c.WorktreeSets[i].Members))
 			for j, member := range c.WorktreeSets[i].Members {
@@ -317,6 +324,9 @@ func NormalizePaths() (int, error) {
 	}
 	for _, set := range raw.WorktreeSets {
 		if set.MirrorRoot != "" && StoredPath(ResolvePath(set.MirrorRoot)) != set.MirrorRoot {
+			changed++
+		}
+		if set.Root != "" && StoredPath(ResolvePath(set.Root)) != set.Root {
 			changed++
 		}
 		for _, m := range set.Members {
