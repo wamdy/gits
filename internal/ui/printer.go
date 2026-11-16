@@ -227,6 +227,23 @@ func PrintScanCandidate(index int, info repo.RepositoryInfo, registeredID int, a
 		statusColor, status, ColorReset)
 }
 
+// worktreeSetLayoutSegment 生成集合标题里的「布局」段（#1434）。
+//
+// 只在 layout 非空时输出：flat 在配置里**不写** layout 键（omitempty 零污染），
+// 凭空补一行「布局: flat」会让存量界面漂移；同理，手工编辑出的 mirror 集合若漏了
+// 基准，也只说布局、不编造路径。基准一并显示是有意为之——同构集合的成员的相对结构
+// 全靠它解释，漏掉它就只能靠猜。
+func worktreeSetLayoutSegment(set config.WorktreeSet) string {
+	if set.Layout == "" {
+		return ""
+	}
+	seg := fmt.Sprintf(", %s: %s", i18n.T("worktree_set_layout"), set.Layout)
+	if set.MirrorRoot != "" {
+		seg += fmt.Sprintf(", %s: %s", i18n.T("worktree_mirror_root_label"), set.MirrorRoot)
+	}
+	return seg
+}
+
 // PrintWorktreeSets 输出 config show 的「worktree 集合」块（紧跟配置项块之后）。
 // 无集合时整块不输出，保持既有界面不噪。
 func PrintWorktreeSets(sets []config.WorktreeSet, allRepos []config.Repository) {
@@ -237,9 +254,10 @@ func PrintWorktreeSets(sets []config.WorktreeSet, allRepos []config.Repository) 
 
 	fmt.Printf("\n%s%s%s:\n", ColorCyan, i18n.T("worktree_sets"), ColorReset)
 	for _, s := range sets {
-		fmt.Printf("  %s%s%s (%s: %s%s%s, %s):\n",
+		fmt.Printf("  %s%s%s (%s: %s%s%s%s, %s):\n",
 			ColorBlue, s.Name, ColorReset,
 			i18n.T("branch"), ColorPurple, s.Branch, ColorReset,
+			worktreeSetLayoutSegment(s),
 			i18n.T("worktree_set_members", len(s.Members)))
 		if len(s.Members) == 0 {
 			fmt.Println("    " + i18n.T("empty"))
@@ -263,9 +281,10 @@ func PrintWorktreeSetList(sets []config.WorktreeSet, allRepos []config.Repositor
 	repoByID := repo.IndexByID(allRepos)
 
 	for _, s := range sets {
-		fmt.Printf("\n%s%s%s (%s: %s%s%s, %s):\n",
+		fmt.Printf("\n%s%s%s (%s: %s%s%s%s, %s):\n",
 			ColorCyan, s.Name, ColorReset,
 			i18n.T("branch"), ColorPurple, s.Branch, ColorReset,
+			worktreeSetLayoutSegment(s),
 			i18n.T("worktree_set_members", len(s.Members)))
 		if len(s.Members) == 0 {
 			fmt.Println("  " + i18n.T("empty"))

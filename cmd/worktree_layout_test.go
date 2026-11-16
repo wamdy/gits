@@ -196,3 +196,146 @@ func TestFlatBuildOrderIsIdentity(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------- 命令接线（#1434 Task 5）
+//
+// 接线层的三个决定各自有钉：布局取值不猜默认（normalizeLayout）、
+// 布局问题并进预检同一出口（planWorktreeMembers）、flat 不写 layout 键（worktreeSetLayoutKeys）。
+
+func TestNormalizeLayoutAcceptsOnlyFlatMirror(t *testing.T) {
+	withZhLang(t)
+
+	for _, c := range []struct{ in, want string }{
+		{"", layoutFlat},            // 不给旗标＝既有扁平行为，逐字不变
+		{"flat", layoutFlat},        // 显式 flat 也归一成 flat（登记时仍不落键）
+		{"  MIRROR ", layoutMirror}, // 大小写与空白收敛，避免 "Mirror" 静默变 flat
+	} {
+		got, err := normalizeLayout(c.in)
+		if err != nil {
+			t.Errorf("normalizeLayout(%q) 报错: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("normalizeLayout(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	for _, bad := range []string{"isomorphic", "flat2", "mirror-flat", "平铺"} {
+		got, err := normalizeLayout(bad)
+		if err == nil {
+			t.Errorf("normalizeLayout(%q) = %q, want 报错（布局口径不许猜默认）", bad, got)
+			continue
+		}
+		// 报错文案必须把合法取值说全，否则用户只能去翻源码。
+		msg := err.Error()
+		if !strings.Contains(msg, layoutFlat) || !strings.Contains(msg, layoutMirror) {
+			t.Errorf("非法布局文案应列出 flat/mirror，实得 %q", msg)
+		}
+	}
+}
+
+func TestPlanWorktreeMembersFlatKeepsPaddedPaths(t *testing.T) {
+	withZhLang(t)
+	root := filepath.Join(t.TempDir(), "base")
+	repos := []repo.RepositoryInfo{info(1, "a", filepath.Join(root, "a")), info(2, "b", filepath.Join(root, "b"))}
+	setRoot := filepath.Join(root, ".worktrees", "s")
+
+	paths, issues, mirrorRoot := planWorktreeMembers(repos, setRoot, layoutFlat, "")
+	if len(issues) != 0 {
+		t.Errorf("flat 不该产生布局问题，实得 %q", issues)
+	}
+	if mirrorRoot != "" {
+		t.Errorf("flat 不该有镜像基准，实得 %q", mirrorRoot)
+	}
+	for i, want := range []string{filepath.Join(setRoot, "a"), filepath.Join(setRoot, "b")} {
+		if paths[i] != want {
+			t.Errorf("flat paths[%d] = %q, want %q（压平口径不许被镜像改动带偏）", i, paths[i], want)
+		}
+	}
+}
+
+func TestPlanWorktreeMembersMirrorsAndMergesIssues(t *testing.T) {
+	withZhLang(t)
+	base := t.TempDir()
+	// outside 不在 base 之下（换一个临时根），必须点名而不是静默压平。
+	other := t.TempDir()
+	repos := []repo.RepositoryInfo{
+		info(1, "tools", filepath.Join(base, "code", "tools", "gits")),
+		info(2, "outside", filepath.Join(other, "outside")),
+	}
+	setRoot := filepath.Join(base, ".worktrees", "s")
+
+	paths, issues, mirrorRoot := planWorktreeMembers(repos, setRoot, layoutMirror, base)
+	if mirrorRoot != filepath.Clean(base) {
+		t.Errorf("显式基准 = %q, want %q", mirrorRoot, filepath.Clean(base))
+	}
+	if want := filepath.Join(setRoot, "code", "tools", "gits"); paths[0] != want {
+		t.Errorf("镜像 paths[0] = %q, want %q", paths[0], want)
+	}
+	if paths[1] != "" {
+		t.Errorf("被拒成员路径应留空串（不可能被误用），实得 %q", paths[1])
+	}
+	if len(issues) != 1 || !strings.Contains(issues[0], "outside") {
+		t.Fatalf("越界成员应逐仓点名进 issues，实得 %q", issues)
+	}
+}
+
+// TestWorktreeSetLayoutKeys 钉住「flat 不落键」的出入口责任在 cmd 层：
+// 配置层照单序列化（TestWorktreeSetFlatLayoutOmitted 已钉），所以一旦这里传 "flat"，
+// 每个存量用户下一次 add 都会在 config.json 里多出两行噪音。
+func TestWorktreeSetLayoutKeys(t *testing.T) {
+	if l, r := worktreeSetLayoutKeys(layoutFlat, filepath.Join("D:", "ws")); l != "" || r != "" {
+		t.Errorf("flat 登记 = (%q, %q), want (\"\", \"\")（omitempty 零污染）", l, r)
+	}
+	if l, r := worktreeSetLayoutKeys("", "x"); l != "" || r != "" {
+		t.Errorf("缺省登记 = (%q, %q), want (\"\", \"\")", l, r)
+	}
+	root := filepath.Join("D:", "ws")
+	if l, r := worktreeSetLayoutKeys(layoutMirror, root); l != layoutMirror || r != root {
+		t.Errorf("mirror 登记 = (%q, %q), want (%q, %q)", l, r, layoutMirror, root)
+	}
+}
+
+// TestResolveWorktreeLayoutCombinationSemantics 钉两个旗标的**组合语义**。
+// 单旗标的口径 normalizeLayout 已经钉过；这里钉的是「只给一个」和「互相矛盾」时
+// 谁说了算——被静默丢弃的旗标正是本项目反复登记过的「门全绿而功能死」同型缺陷。
+func TestResolveWorktreeLayoutCombinationSemantics(t *testing.T) {
+	withZhLang(t)
+
+	cases := []struct {
+		name       string
+		layout     string
+		mirrorRoot string
+		want       string // "" 表示应报错
+	}{
+		{"缺省即 flat", "", "", layoutFlat},
+		{"显式 flat", "flat", "", layoutFlat},
+		{"显式 mirror", "mirror", "", layoutMirror},
+		{"只给基准＝要同构", "", filepath.Join("D:", "ws"), layoutMirror},
+		{"基准与 mirror 同向", "mirror", filepath.Join("D:", "ws"), layoutMirror},
+		{"显式 flat 又给基准＝自我矛盾", "flat", filepath.Join("D:", "ws"), ""},
+		{"非法布局不因给了基准而绕过", "isomorphic", filepath.Join("D:", "ws"), ""},
+	}
+	for _, c := range cases {
+		got, err := resolveWorktreeLayout(c.layout, c.mirrorRoot)
+		if c.want == "" {
+			if err == nil {
+				t.Errorf("%s：应报错，实得 %q", c.name, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s：不该报错，实得 %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s：= %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// 矛盾文案必须说清「谁没被消费」和「怎么改」，只说 invalid 等于没说。
+	_, err := resolveWorktreeLayout("flat", filepath.Join("D:", "ws"))
+	if err == nil || !strings.Contains(err.Error(), "flat") || !strings.Contains(err.Error(), "mirror") {
+		t.Errorf("矛盾文案应同时点出 flat/mirror 的改法，实得 %v", err)
+	}
+}

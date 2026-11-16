@@ -324,3 +324,45 @@ func TestPrintGroupDetailsMarkUsesFullRegistry(t *testing.T) {
 		t.Errorf("不得退回目录 Base 名（与 config show 口径发散），实得:\n%s", out)
 	}
 }
+
+// TestPrintWorktreeSetListShowsMirrorLayout 覆盖 #1434 集合登记口径的可见面：
+// mirror 集合必须让人一眼看出「成员路径是磁盘同构而非压平」，
+// 而 flat / 存量集合**不许**多出这一行——配置里没写 layout 键，界面就不该凭空造一行。
+func TestPrintWorktreeSetListShowsMirrorLayout(t *testing.T) {
+	resetColors()
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	alive := t.TempDir()
+	all := []config.Repository{{ID: 3, Name: "gits@demo", Path: alive}}
+	mirror := config.WorktreeSet{
+		Name: "demo", Branch: "harness/demo", Layout: "mirror",
+		MirrorRoot: filepath.Clean("/ws"),
+		Members:    []config.WorktreeMember{{RepoID: 3, Path: alive}},
+	}
+	flat := config.WorktreeSet{Name: "old", Branch: "harness/old",
+		Members: []config.WorktreeMember{{RepoID: 3, Path: alive}}}
+
+	for _, print := range []struct {
+		label string
+		fn    func()
+	}{
+		{"worktree list", func() { PrintWorktreeSetList([]config.WorktreeSet{mirror, flat}, all) }},
+		{"config show", func() { PrintWorktreeSets([]config.WorktreeSet{mirror, flat}, all) }},
+	} {
+		out := captureStdout(t, print.fn)
+		if got := strings.Count(out, i18n.T("worktree_set_layout")); got != 1 {
+			t.Errorf("%s：「布局」行出现 %d 次, want 1（只有 mirror 集合有）:\n%s", print.label, got, out)
+		}
+		for _, want := range []string{"mirror", filepath.Clean("/ws")} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s：布局行应含 %q，实得:\n%s", print.label, want, out)
+			}
+		}
+		// 存量集合行仍照常输出，不能被布局分支吞掉。
+		if !strings.Contains(out, "old") {
+			t.Errorf("%s：flat/存量集合不应被布局改动漏掉:\n%s", print.label, out)
+		}
+	}
+}

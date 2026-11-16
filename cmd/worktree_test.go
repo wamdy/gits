@@ -472,7 +472,10 @@ func TestCreateWorktreesRollbackOnlyThisCall(t *testing.T) {
 	}
 	labels := []string{"[1] good (feat/x)", "[2] bad (main)"}
 
-	created, failedLabel := createWorktrees(repos, paths, labels, "feat/x")
+	// flat（既有口径）下 order 必须是恒等切片——本用例同时钉住「加了 order 参数
+	// 也不许改掉扁平集合的执行顺序」，与 TestFlatBuildOrderIsIdentity 一处用真实 git 复验。
+	order := worktreeBuildOrder(repos, paths, false)
+	created, failedLabel := createWorktrees(repos, paths, labels, "feat/x", order)
 	if failedLabel == "" {
 		t.Fatal("第 2 个成员缺分支，createWorktrees 应报失败")
 	}
@@ -581,5 +584,91 @@ func TestPrecheckFlagsBranchAlreadyCheckedOut(t *testing.T) {
 	}
 	if got := worktreeListCount(t, main); got != 1 {
 		t.Errorf("预检后 worktree 数 = %d, want 1（只有主仓）", got)
+	}
+}
+
+// TestWorktreeAddFlagsRegistered 钉旗标真注册上（"契约钉形状不钉用法"的同型坑：
+// 纯函数全绿而命令面收不到 --layout，等于功能不存在）。
+func TestWorktreeAddFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"layout", "mirror-root"} {
+		f := worktreeAddCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("worktree add 未注册 --%s", name)
+		}
+		if f.DefValue != "" {
+			t.Errorf("--%s 缺省值 = %q, want \"\"（缺省即 flat，行为逐字不变）", name, f.DefValue)
+		}
+		if strings.TrimSpace(f.Usage) == "" {
+			t.Errorf("--%s 用法文案为空（help 必须能自解释两种布局）", name)
+		}
+	}
+	// --dir 与新旗标正交：集合根仍由 --dir 决定，镜像只改根内的相对结构。
+	if worktreeAddCmd.Flags().Lookup("dir") == nil {
+		t.Error("--dir 必须仍在（本票不撤既有旗标）")
+	}
+}
+
+// createWorktreesRun 把「执行」与「stdout 捕获」收进一次调用，返回三条口径：
+// created（执行序）、failedLabel（首个失败成员）、out（结果行文本，用于验输出序）。
+func createWorktreesRun(t *testing.T, repos []repo.RepositoryInfo, paths, labels []string,
+	branch string, order []int) (created []string, failedLabel string, out string) {
+	t.Helper()
+	out = captureCmdStdout(t, func() {
+		created, failedLabel = createWorktrees(repos, paths, labels, branch, order)
+	})
+	return created, failedLabel, out
+}
+
+// TestCreateWorktreesAncestorFirstAndPrintsBySelection 是唯一同时钉住
+// 「执行顺序」与「输出顺序」两条口径的用例，二者故意不同：
+//   - 执行按 order（祖先优先）：实测反序时 git 对祖先 `already exists` 退 128（E2）；
+//   - 输出按选择索引：沿 #1276 的清单归位口径，flat 用户看到的行序不许变。
+//
+// 反序对照组是这条红线的依据本身——少了它，"祖先优先"只是恰好能跑，不是必须这样跑。
+func TestCreateWorktreesAncestorFirstAndPrintsBySelection(t *testing.T) {
+	requireGit(t)
+	prev := i18n.CurrentLang()
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(prev)
+
+	// inner 是 a 工作树**之内**的另一个仓（嵌套仓，非 submodule）——镜像布局的全部难点就在这。
+	innerMirror := func(root string) ([]repo.RepositoryInfo, []string, []string) {
+		shallow := newMainRepo(t, filepath.Join(root, "a"), "harness/demo")
+		deep := newMainRepo(t, filepath.Join(root, "a", "tools", "inner"), "harness/demo")
+		setRoot := filepath.Join(root, "wt", "demo")
+		repos := []repo.RepositoryInfo{info(2, "inner", deep), info(1, "a", shallow)}
+		paths := []string{filepath.Join(setRoot, "a", "tools", "inner"), filepath.Join(setRoot, "a")}
+		return repos, paths, []string{"[2] inner", "[1] a"}
+	}
+
+	repos, paths, labels := innerMirror(t.TempDir())
+	order := worktreeBuildOrder(repos, paths, true)
+	if len(order) != 2 || order[0] != 1 || order[1] != 0 {
+		t.Fatalf("order = %v, want [1 0]（祖先在前）", order)
+	}
+
+	created, failedLabel, out := createWorktreesRun(t, repos, paths, labels, "harness/demo", order)
+	if failedLabel != "" {
+		t.Fatalf("祖先优先顺序下不该失败，实得 %q\n%s", failedLabel, out)
+	}
+	// created 是**执行序**（回滚按它倒序走，必须最深的先回）。
+	if created[0] != paths[1] || created[1] != paths[0] {
+		t.Errorf("created 执行序 = %v, want [%q %q]", created, paths[1], paths[0])
+	}
+	// 结果行按选择索引打印：inner 的行必须排在 a 的行之前。
+	iInner, iOuter := strings.Index(out, paths[0]), strings.Index(out, paths[1])
+	if iInner < 0 || iOuter < 0 {
+		t.Fatalf("结果行应同时含两个目标路径，实得:\n%s", out)
+	}
+	if iInner > iOuter {
+		t.Errorf("输出未按选择索引归位（inner 行应早于 a 行）:\n%s", out)
+	}
+
+	// 反序对照：同一形状另起目录、按 [0 1]（深先浅后）执行 → 浅层被 git 拒。
+	repos2, paths2, labels2 := innerMirror(t.TempDir())
+	if _, failed, out2 := createWorktreesRun(t, repos2, paths2, labels2, "harness/demo", []int{0, 1}); failed == "" {
+		t.Error("反序（深先浅后）应被 git 拒绝并点名失败成员，实得零失败——顺序红线失去依据")
+	} else if !strings.Contains(out2, "[1] a") {
+		t.Errorf("失败结果行应点名浅层成员 a，实得:\n%s", out2)
 	}
 }

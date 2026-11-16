@@ -35,13 +35,15 @@ var worktreeCmd = &cobra.Command{
 }
 
 var (
-	wtBranch string
-	wtDir    string
-	wtForce  bool
+	wtBranch     string
+	wtDir        string
+	wtForce      bool
+	wtLayout     string
+	wtMirrorRoot string
 )
 
 var worktreeAddCmd = &cobra.Command{
-	Use:   "add [set-name] -r <selection> [--branch <branch>] [--dir <root>]",
+	Use:   "add [set-name] -r <selection> [--branch <branch>] [--dir <root>] [--layout flat|mirror] [--mirror-root <base>]",
 	Short: "Create one worktree per selected repository and register a set",
 	Args:  cobra.MaximumNArgs(1),
 	Run:   runWorktreeAdd,
@@ -176,6 +178,30 @@ func normalizeLayout(flagValue string) (string, error) {
 	}
 }
 
+// resolveWorktreeLayout 收敛 `--layout` 与 `--mirror-root` 的**组合**语义
+// （normalizeLayout 只管单旗标取值，这里管两个旗标撞在一起时谁说了算）：
+//
+//   - 两个都不给 → flat，与 #1064 终态逐字一致；
+//   - 只给 --mirror-root → 判为 mirror。给了基准还压平，等于把用户明确表达的意图
+//     静默丢掉——旗标被忽略比报错更难查（本项目登记过的「门全绿而功能死」同型缺陷）；
+//   - 显式 --layout flat + --mirror-root → 点名矛盾。这两个取值互相否定，
+//     flat 下基准没有任何消费点，不存在「定个语义」的余地，只能让人改；
+//   - --layout 取值非法 → 先报非法（不因顺带给了基准而绕过校验）。
+func resolveWorktreeLayout(layoutFlag, mirrorRootFlag string) (string, error) {
+	explicitRoot := strings.TrimSpace(mirrorRootFlag) != ""
+	if strings.TrimSpace(layoutFlag) == "" && explicitRoot {
+		return layoutMirror, nil
+	}
+	layout, err := normalizeLayout(layoutFlag)
+	if err != nil {
+		return "", err
+	}
+	if layout == layoutFlat && explicitRoot {
+		return "", errors.New(i18n.T("worktree_layout_conflict"))
+	}
+	return layout, nil
+}
+
 // defaultMirrorRoot 缺省镜像基准＝配置基目录的**父目录**（不是它自己）。
 // 原因在现网就能看到：`.gits` 位于 appollo 根，取它当基准会让 appollo 自己 rel=="."，
 // 撞上集合根本身；取父目录后 appollo → `<集合根>/appollo`、
@@ -258,9 +284,36 @@ func worktreeBuildOrder(repos []repo.RepositoryInfo, paths []string, mirror bool
 
 // ---------------------------------------------------------------- 阶段 A 预检
 
+// planWorktreeMembers 是 runWorktreeAdd 唯一的落位入口：按布局口径算成员路径，
+// 并把**布局专属**问题（越界、撞基准、跨卷）与阶段 A 预检问题合并成同一份点名清单，
+// 走同一「整组不建」出口（AC-02.2 的失败语义对两类问题是同一条）。
+//
+// 返回的 mirrorRoot 供集合登记；flat 恒返回空串，调用方不得据此猜基准。
+// 抽成函数而不是就地 if：镜像的三条拒绝必须与 flat 走同一条出口，
+// 复制一份退出逻辑就是复制一份会漂移的口径。
+func planWorktreeMembers(repos []repo.RepositoryInfo, rootDir, layout, mirrorRootFlag string) (paths []string, issues []string, mirrorRoot string) {
+	if layout != layoutMirror {
+		return worktreeMemberPaths(rootDir, repos), nil, ""
+	}
+	mirrorRoot = resolveMirrorRoot(mirrorRootFlag)
+	paths, issues = mirrorMemberPaths(rootDir, mirrorRoot, repos)
+	return paths, issues, mirrorRoot
+}
+
+// worktreeSetLayoutKeys 决定集合登记里 layout/mirror_root 两键写什么。
+// 归一责任在 cmd 层：配置层照单序列化（TestWorktreeSetFlatLayoutOmitted 已钉），
+// 这里若把 flat 写成显式 "flat"，每个存量用户下次 add 都会在 config.json 多出两行噪音，
+// 而 omitempty 的意义正是「缺省口径不落盘」。
+func worktreeSetLayoutKeys(layout, mirrorRoot string) (string, string) {
+	if layout != layoutMirror {
+		return "", ""
+	}
+	return layoutMirror, mirrorRoot
+}
+
 // precheckWorktreeAdd 只读预检，零副作用：绝不创建目录、绝不调用 git worktree add。
-// 逐项检查 submodule 排除（Q5）、非 git 目录、分支存在性（AC-02.3）与「分支已被本仓 worktree
-// 检出」（评审 Q-03）、目标路径占用、成员重复；
+// 逐项检查非 git 目录（含未 init 的 submodule，E8）、分支存在性（AC-02.3）与
+// 「分支已被本仓 worktree 检出」（评审 Q-03）、目标路径占用、成员重复；
 // 返回逐仓点名清单（含缺分支仓的名字与其当前分支），非空即调用方整组不建（AC-02.2）。
 func precheckWorktreeAdd(repos []repo.RepositoryInfo, paths []string, branch string) []string {
 	var issues []string
@@ -306,21 +359,46 @@ func precheckWorktreeAdd(repos []repo.RepositoryInfo, paths []string, branch str
 
 // ---------------------------------------------------------------- 阶段 B 创建
 
-// createWorktrees 逐个执行 `git worktree add <path> <branch>`。
-// 返回本次调用已成功创建的路径（内存记账，回滚只认这份清单）与失败成员的标签；
-// 失败详情（含 git 输出）由结果行打印，本函数不重复输出。
-func createWorktrees(repos []repo.RepositoryInfo, paths, labels []string, branch string) (created []string, failedLabel string) {
-	for i, r := range repos {
-		result := git.WorktreeAdd(r.Path, paths[i], branch)
-		// 结果行回显 worktree 目标路径：git 的执行目录是主仓，展示主仓路径对建组没有信息量。
-		result.RepoPath = paths[i]
-		ui.PrintGitResult(result, labels[i])
-		if !result.Success {
-			return created, labels[i]
-		}
-		created = append(created, paths[i])
+// createWorktrees 按 order 指定的**执行顺序**逐个 `git worktree add`，
+// 结果行却按**选择索引**顺序打印——两条顺序故意分开：
+//   - 执行序服务 git 的硬约束：镜像布局必须先建祖先，实测反序时 git 对祖先直接
+//     `fatal: '<path>' already exists` 退 128（E2），留下半个集合并触发回滚链；
+//   - 行序服务人：沿 #1276「结尾清单按选择索引归位」的口径，flat 下 order 恒等，
+//     输出与改造前逐字相同。
+//
+// created 记录的是**执行序**——rollbackWorktrees 按它倒序回滚，最深的成员先回。
+// 失败即停；已尝试过的成员（含失败那条）都会打出结果行，未尝试的不打。
+// 失败详情（含 git 输出）由结果行承担，本函数不重复输出。
+func createWorktrees(repos []repo.RepositoryInfo, paths, labels []string, branch string, order []int) (created []string, failedLabel string) {
+	type attempt struct {
+		result git.ExecutionResult
+		label  string
+		done   bool
 	}
-	return created, ""
+	attempts := make([]attempt, len(repos))
+	for _, idx := range order {
+		if idx < 0 || idx >= len(repos) {
+			continue // 越界索引不参与（宁可少跑，不可 panic 在半途留下半个集合）
+		}
+		result := git.WorktreeAdd(repos[idx].Path, paths[idx], branch)
+		// 结果行回显 worktree 目标路径：git 的执行目录是主仓，展示主仓路径对建组没有信息量。
+		result.RepoPath = paths[idx]
+		attempts[idx] = attempt{result: result, label: labels[idx], done: true}
+		if !result.Success {
+			break
+		}
+		created = append(created, paths[idx])
+	}
+	for _, a := range attempts {
+		if !a.done {
+			continue
+		}
+		ui.PrintGitResult(a.result, a.label)
+		if !a.result.Success {
+			failedLabel = a.label
+		}
+	}
+	return created, failedLabel
 }
 
 // rollbackWorktrees 只回滚本次调用新建的 worktree（AC-02.4）：
@@ -441,6 +519,13 @@ func runWorktreeAdd(cmd *cobra.Command, args []string) {
 		exitOnError(err)
 	}
 
+	// #1434：布局口径在选择解析**之前**收敛。打错 --layout 若放到后面才发现，
+	// 用户已经白等一轮仓库扫描；布局与基准两个旗标的组合语义见 resolveWorktreeLayout。
+	layout, err := resolveWorktreeLayout(wtLayout, wtMirrorRoot)
+	if err != nil {
+		exitOnError(err)
+	}
+
 	repos, err := selectRepos(GetRepoIDs(), GetGroup(), cfg)
 	if errors.Is(err, errNoRepositories) {
 		ui.PrintNoConfigPrompt()
@@ -478,8 +563,10 @@ func runWorktreeAdd(cmd *cobra.Command, args []string) {
 	}
 
 	// 阶段 A：预检（只读、零副作用）——任一失败即一个 worktree 都不建（AC-02.2）。
-	paths := worktreeMemberPaths(rootDir, repos)
-	issues := precheckWorktreeAdd(repos, paths, branch)
+	// 布局问题（越界/撞基准/跨卷）与逐仓问题合并成同一份点名清单、走同一出口：
+	// 镜像的拒绝口径是「整组不建 + 逐仓点名」，不是静默降级成 flat。
+	paths, issues, mirrorRoot := planWorktreeMembers(repos, rootDir, layout, wtMirrorRoot)
+	issues = append(issues, precheckWorktreeAdd(repos, paths, branch)...)
 	if len(issues) > 0 {
 		for _, line := range issues {
 			ui.PrintMessage(line)
@@ -498,7 +585,9 @@ func runWorktreeAdd(cmd *cobra.Command, args []string) {
 	}
 
 	// 阶段 B：逐个创建；中途失败只回滚本次调用新建的（AC-02.4）。
-	created, failedLabel := createWorktrees(repos, paths, labels, branch)
+	// 执行顺序按布局口径（镜像＝祖先优先，E2），结果行仍按选择索引归位（#1276 口径）。
+	order := worktreeBuildOrder(repos, paths, layout == layoutMirror)
+	created, failedLabel := createWorktrees(repos, paths, labels, branch, order)
 	if failedLabel != "" {
 		// 失败详情（含 git 输出）已由 createWorktrees 里的结果行打印，这里只补回滚与结论。
 		rolled := rollbackWorktrees(created)
@@ -516,7 +605,11 @@ func runWorktreeAdd(cmd *cobra.Command, args []string) {
 	if err != nil {
 		exitOnError(err)
 	}
-	set := config.WorktreeSet{Name: setName, Branch: branch, Members: members}
+	// 布局口径随集合一起登记：`worktree list` / `config show` 要靠它区分同构与压平，
+	// 而 flat 两键全空（omitempty 零污染，存量配置文件一行不多）。
+	setLayout, setMirrorRoot := worktreeSetLayoutKeys(layout, mirrorRoot)
+	set := config.WorktreeSet{Name: setName, Branch: branch, Layout: setLayout,
+		MirrorRoot: setMirrorRoot, Members: members}
 	cfg.WorktreeSets = append(cfg.WorktreeSets, set)
 	if err := cfg.Save(); err != nil {
 		exitOnError(err)
@@ -664,6 +757,12 @@ func initWorktreeCmdI18n() {
 	if f := worktreeAddCmd.Flags().Lookup("dir"); f != nil {
 		f.Usage = i18n.T("flag_worktree_dir")
 	}
+	if f := worktreeAddCmd.Flags().Lookup("layout"); f != nil {
+		f.Usage = i18n.T("flag_worktree_layout")
+	}
+	if f := worktreeAddCmd.Flags().Lookup("mirror-root"); f != nil {
+		f.Usage = i18n.T("flag_worktree_mirror_root")
+	}
 	if f := worktreeRemoveCmd.Flags().Lookup("force"); f != nil {
 		f.Usage = i18n.T("flag_worktree_force")
 	}
@@ -677,6 +776,8 @@ func init() {
 
 	worktreeAddCmd.Flags().StringVar(&wtBranch, "branch", "", i18n.T("flag_worktree_branch"))
 	worktreeAddCmd.Flags().StringVar(&wtDir, "dir", "", i18n.T("flag_worktree_dir"))
+	worktreeAddCmd.Flags().StringVar(&wtLayout, "layout", "", i18n.T("flag_worktree_layout"))
+	worktreeAddCmd.Flags().StringVar(&wtMirrorRoot, "mirror-root", "", i18n.T("flag_worktree_mirror_root"))
 	worktreeRemoveCmd.Flags().BoolVar(&wtForce, "force", false, i18n.T("flag_worktree_force"))
 	initWorktreeCmdI18n()
 }
