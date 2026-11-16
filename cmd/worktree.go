@@ -273,12 +273,13 @@ func precheckWorktreeAdd(repos []repo.RepositoryInfo, paths []string, branch str
 		}
 		seen[r.ID] = true
 
-		switch git.Classify(r.Path) {
-		case git.KindNotGit:
+		// #1434 R1-a：submodule 源放行（原 #1064 Q5 的"本期不支持"由本预检 + config scan
+		// 静默跳过两条闸共同构成，本票同批撤除）。实测依据：对真 submodule 源执行
+		// `git worktree add` 成功且可用（E4），建出的 worktree 落 KindLinkedWorktree（E7），
+		// 归属由 MainRepoPath 的 core.worktree 判据解析回源 submodule 工作树（E12/E13）。
+		// **未 init** 的 submodule 两次 rev-parse 失败落 KindNotGit（E8），仍被下面一支点名拒绝。
+		if kind := git.Classify(r.Path); kind == git.KindNotGit {
 			issues = append(issues, i18n.T("worktree_not_git", label))
-			continue
-		case git.KindSubmodule:
-			issues = append(issues, i18n.T("worktree_submodule_unsupported", label))
 			continue
 		}
 

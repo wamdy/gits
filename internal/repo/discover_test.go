@@ -229,9 +229,9 @@ func TestDiscoverLinkedWorktreeIsFound(t *testing.T) {
 	}
 }
 
-// TestDiscoverSkipsSubmodule 验证 AC-01.2 的 Q5 口径：submodule（`.git` 文件且
-// git-dir == common-dir）不进候选、不报错。
-func TestDiscoverSkipsSubmodule(t *testing.T) {
+// TestDiscoverIncludesSubmodule 验证 #1434 R1-a（重开 #1064 Q5）：submodule
+// （`.git` 文件且 git-dir == common-dir）进候选、不报错，且作为源树 WorktreeOf 为空。
+func TestDiscoverIncludesSubmodule(t *testing.T) {
 	root := t.TempDir()
 	main := filepath.Join(root, "repo-main")
 	gitInit(t, main)
@@ -246,27 +246,41 @@ func TestDiscoverSkipsSubmodule(t *testing.T) {
 
 	got, err := Discover(root)
 	if err != nil {
-		t.Fatalf("Discover(%s) = _, %v（submodule 不应导致报错）", root, err)
+		t.Fatalf("Discover(%s) = _, %v（submodule 不该导致报错）", root, err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("discovered = %d 条 %v, want 1（只有主仓）", len(got), got)
+	// #1434 R1-a：submodule 不再被静默跳过——它是 worktree 集合的一等可选成员。
+	// 原 Q5 口径由"预检点名拒绝 + 这里静默跳过"两条闸共同构成，本票同批撤除；
+	// 只放开 add 会留下"支持一种选不进来的成员"。
+	if len(got) != 2 {
+		t.Fatalf("discovered = %d 条 %v, want 2（主仓 + submodule）", len(got), got)
 	}
-	if !sameDir(got[0].Path, main) {
-		t.Errorf("discovered[0].Path = %q, want 主仓 %q", got[0].Path, main)
+	var names []string
+	for _, r := range got {
+		names = append(names, r.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "loose-sub,repo-main" {
+		t.Errorf("discovered names = %v, want [loose-sub repo-main]", names)
+	}
+	for _, r := range got {
+		if r.Name == "loose-sub" && r.WorktreeOf != "" {
+			// submodule 自己是源树（git-dir == common-dir），不是谁的 worktree。
+			t.Errorf("loose-sub WorktreeOf = %q, want empty（源树形态不该标归属）", r.WorktreeOf)
+		}
 	}
 
-	// 直接扫描 submodule 检出目录：0 候选，仍不报错。
+	// 直接扫描 submodule 检出目录：现在也应拿到 1 条候选。
 	only, err := Discover(sub)
 	if err != nil {
 		t.Fatalf("Discover(submodule) = _, %v", err)
 	}
-	if len(only) != 0 {
-		t.Errorf("Discover(submodule) = %v, want 空", only)
+	if len(only) != 1 {
+		t.Errorf("Discover(submodule) = %v, want 1 条", only)
 	}
 }
 
-// TestDiscoverWorktreeAndSubmoduleMixed 三态同现于一次扫描：主仓 + worktree 进候选、
-// submodule 被跳过（AC-01.1 / AC-01.2 组合口径）。
+// TestDiscoverWorktreeAndSubmoduleMixed 三态同现于一次扫描：主仓 + worktree + submodule 全进候选
+// （AC-01.1 / AC-01.2 组合口径 + #1434 R1-a）。
 func TestDiscoverWorktreeAndSubmoduleMixed(t *testing.T) {
 	root := t.TempDir()
 	main := filepath.Join(root, "repo-main")
@@ -293,9 +307,9 @@ func TestDiscoverWorktreeAndSubmoduleMixed(t *testing.T) {
 	}
 	sort.Strings(names)
 
-	want := []string{"repo-main", "wt-a"}
+	want := []string{"loose-sub", "repo-main", "wt-a"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Fatalf("discovered = %v, want %v（submodule 应被跳过）", names, want)
+		t.Fatalf("discovered = %v, want %v（三态全部进候选）", names, want)
 	}
 	for _, r := range got {
 		switch r.Name {
@@ -303,9 +317,9 @@ func TestDiscoverWorktreeAndSubmoduleMixed(t *testing.T) {
 			if !sameDir(r.WorktreeOf, main) {
 				t.Errorf("wt-a WorktreeOf = %q, want %q", r.WorktreeOf, main)
 			}
-		case "repo-main":
+		case "repo-main", "loose-sub":
 			if r.WorktreeOf != "" {
-				t.Errorf("repo-main WorktreeOf = %q, want empty", r.WorktreeOf)
+				t.Errorf("%s WorktreeOf = %q, want empty（源树形态）", r.Name, r.WorktreeOf)
 			}
 		}
 	}

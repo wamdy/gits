@@ -117,8 +117,12 @@ func TestPrecheckWorktreeAddIsZeroSideEffect(t *testing.T) {
 	}
 }
 
-// TestPrecheckWorktreeAddRejectsSubmodule 覆盖 Q5：判定为 submodule 的成员直接拒绝并说明不支持。
-func TestPrecheckWorktreeAddRejectsSubmodule(t *testing.T) {
+// TestPrecheckWorktreeAddAcceptsSubmodule #1434 R1-a：submodule 源不再是阻断项。
+//
+// 原 #1064 Q5 的"本期不支持"由两条闸共同构成（本预检点名拒绝 + config scan 静默跳过），
+// 本票同批撤除；未 init 的 submodule 会因两次 rev-parse 失败落 KindNotGit，仍由上一条分支点名拒绝。
+// 断言方向：形态判定为 KindSubmodule、分支存在、目标路径未被占用时，预检必须给出**零问题**。
+func TestPrecheckWorktreeAddAcceptsSubmodule(t *testing.T) {
 	prev := i18n.CurrentLang()
 	i18n.SetLang(i18n.Zh)
 	defer i18n.SetLang(prev)
@@ -138,12 +142,36 @@ func TestPrecheckWorktreeAddRejectsSubmodule(t *testing.T) {
 	if out, err := hand.CombinedOutput(); err != nil {
 		t.Skipf("本机 git 不支持 --separate-git-dir 形态，跳过: %v\n%s", err, out)
 	}
+	// 必须真提交：没有 main 分支的话，"零问题"会因为缺分支而红，掩盖本用例真正要证的放行。
+	if err := os.WriteFile(filepath.Join(loose, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	gitIn(t, loose, "add", "a.txt")
+	gitIn(t, loose, "commit", "-q", "-m", "init")
+
+	if got := git.Classify(loose); got != git.KindSubmodule {
+		t.Fatalf("前置条件不成立：夹具应为 KindSubmodule，实得 %d（否则本用例没测到放行分支）", got)
+	}
+	// 目标分支必须**不是**当前检出的分支：git 自身拒绝"同一分支二次检出"，
+	// 拿 main 来断言"零问题"测的是这条通用校验，不是 submodule 放行。
+	gitIn(t, loose, "branch", "harness/demo")
 
 	repos := []repo.RepositoryInfo{info(9, "loose-sub", loose)}
-	paths := worktreeMemberPaths(filepath.Join(root, ".worktrees", "s"), repos)
-	issues := precheckWorktreeAdd(repos, paths, "main")
-	if len(issues) != 1 || !strings.Contains(issues[0], "loose-sub") {
-		t.Fatalf("submodule 成员应被点名拒绝，实得 %q", issues)
+	setRoot := filepath.Join(root, ".worktrees", "s")
+	if issues := precheckWorktreeAdd(repos, worktreeMemberPaths(setRoot, repos), "harness/demo"); len(issues) != 0 {
+		t.Errorf("submodule 源不该再被预检拒绝，实得 %q", issues)
+	}
+
+	// 放行只撤"submodule 形态"这一道闸：其余校验必须照旧咬人。
+	// 同分支已被源树检出 → 仍点名拒绝（与主仓同口径，非 submodule 专属豁免）。
+	occupied := precheckWorktreeAdd(repos, worktreeMemberPaths(setRoot, repos), "main")
+	if len(occupied) != 1 || !strings.Contains(occupied[0], "已被本仓 worktree 检出") {
+		t.Errorf("已检出分支仍应被拒绝，实得 %q", occupied)
+	}
+	// 分支不存在 → 仍点名拒绝。
+	missing := precheckWorktreeAdd(repos, worktreeMemberPaths(setRoot, repos), "no/such-branch")
+	if len(missing) != 1 || !strings.Contains(missing[0], "不存在分支") {
+		t.Errorf("缺失分支仍应被拒绝，实得 %q", missing)
 	}
 }
 

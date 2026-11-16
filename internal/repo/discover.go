@@ -72,10 +72,12 @@ func Discover(path string) ([]RepositoryInfo, error) {
 				if item.gitIsFile {
 					// `.git` 为文件：linked worktree 与 submodule 只靠 git 自身的
 					// git-dir / common-dir 关系区分，不猜路径字符串。
-					switch git.Classify(item.path) {
-					case git.KindSubmodule:
-						continue // Q5：submodule 排除在本票外，静默跳过
-					case git.KindLinkedWorktree:
+					//
+					// #1434 R1-a：submodule 不再是过滤条件。原 #1064 Q5 把它与
+					// `worktree add` 的点名拒绝成对排除；只放开 add 会留下
+					// "支持一种选不进来的成员"（现网两个真 submodule 正因这里静默跳过而从未进过登记表）。
+					// submodule 自己是源树（git-dir == common-dir），WorktreeOf 保持空串。
+					if git.Classify(item.path) == git.KindLinkedWorktree {
 						info.WorktreeOf = git.MainRepoPath(item.path)
 					}
 				}
