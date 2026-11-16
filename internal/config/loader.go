@@ -28,10 +28,18 @@ type WorktreeMember struct {
 }
 
 // WorktreeSet 多仓同名分支 worktree 的具名集合（供 `-r set:<name>` 选择与 worktree 命令族管理）。
+//
+// Layout / MirrorRoot 是**登记性**字段（#1434）：只记录"这个集合当初按哪种口径落位"，
+// 不参与任何执行路径计算（成员路径本身已逐条落盘）。
+//   - Layout 取值 ""|"flat"|"mirror"，**缺键即 flat**——存量集合零迁移；
+//   - 两者都走 omitempty，flat 集合不落新键，避免配置 diff 噪音；
+//   - 老版本 gits 任一写配置会整篇重写并丢掉 worktree_sets 整键（既有已知限制）。
 type WorktreeSet struct {
-	Name    string           `json:"name"`
-	Branch  string           `json:"branch"`
-	Members []WorktreeMember `json:"members"`
+	Name       string           `json:"name"`
+	Branch     string           `json:"branch"`
+	Layout     string           `json:"layout,omitempty"`
+	MirrorRoot string           `json:"mirror_root,omitempty"` // 仅 mirror：实际使用的镜像基准；读写与成员路径同一口径
+	Members    []WorktreeMember `json:"members"`
 }
 
 type Config struct {
@@ -176,8 +184,10 @@ func Load() (*Config, error) {
 		cfg.Repositories[i].Path = ResolvePath(cfg.Repositories[i].Path)
 	}
 
-	// worktree 集合成员路径与仓库路径同一口径：读取时一律解析为绝对路径。
+	// worktree 集合成员路径与镜像基准同一口径：读取时一律解析为绝对路径。
+	// MirrorRoot 缺键（老配置 / flat 集合）时 ResolvePath("") 返回 ""，不产生假基准。
 	for i := range cfg.WorktreeSets {
+		cfg.WorktreeSets[i].MirrorRoot = ResolvePath(cfg.WorktreeSets[i].MirrorRoot)
 		for j := range cfg.WorktreeSets[i].Members {
 			cfg.WorktreeSets[i].Members[j].Path = ResolvePath(cfg.WorktreeSets[i].Members[j].Path)
 		}
@@ -201,9 +211,14 @@ func (c *Config) Save() error {
 	}
 
 	// worktree 集合同样走 StoredPath/ResolvePath；nil 时由 omitempty 整键不写。
+	// mirror_root 与成员路径必须在这一处一起相对化：只相对化成员会让 Save 写出绝对基准，
+	// 与 Load 的 ResolvePath 不再同源，整目录搬迁后 mirror_root 指向老位置（读写同源不变量）。
 	if c.WorktreeSets != nil {
 		stored.WorktreeSets = make([]WorktreeSet, len(c.WorktreeSets))
 		for i, set := range c.WorktreeSets {
+			if set.MirrorRoot != "" {
+				set.MirrorRoot = StoredPath(set.MirrorRoot)
+			}
 			set.Members = make([]WorktreeMember, len(c.WorktreeSets[i].Members))
 			for j, member := range c.WorktreeSets[i].Members {
 				member.Path = StoredPath(member.Path)
