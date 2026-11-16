@@ -102,6 +102,10 @@ gits [全局选项] <命令> [参数]
 │   │   ├── list [集合名]      列出集合与成员（`[ID] 名称 (检出分支) 路径`，目录消失标 missing）
 │   │   ├── remove <集合名>    拆除集合全部成员（任一脏即整组中止；永不删分支）
 │   │   │   └── --force        把 --force 透传给 git worktree remove 以越过脏检查
+│   │   ├── member             集合成员级增删（口径随集合登记，不接受布局旗标）
+│   │   │   ├── add <集合名>    为额外选中的仓库建 worktree 并追加进既有集合（必须显式 -r/-g）
+│   │   │   └── remove <集合名> <成员>  移除单个成员（其内部还有其它成员时拒绝）
+│   │   │       └── --force    同 remove：把 --force 透传给 git，仍不删分支
 │   │   └── prune              只清理登记中已不存在的成员（不删磁盘目录、不调 git worktree prune）
 │   │
 │   ├── pack                  按仓库压缩打包（子命令，不再透传给 git）
@@ -218,6 +222,16 @@ gits [全局选项] <命令> [参数]
 | 集合登记 | 不写 `layout` | `layout: "mirror"` + 绝对 `mirror_root` |
 
 镜像布局的意义在于「集合目录树 = 磁盘目录树」：需要跨仓相对路径的工程（模块按目录层级引用、构建脚本用 `../`）解开就能直接用，压平后这些相对引用全部失效。
+
+**成员级增删**（`worktree member add|remove`）：集合不再只能"一次建、整体拆"。
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `gits worktree member add <集合名> -r <选择>` | 为额外选中的仓库建 worktree 并追加为集合成员。**落位口径随集合登记**（mirror 集合按同构、flat 集合按压平），不接受 `--layout`/`--mirror-root`——中途改口径会让同一集合里出现两种结构；分支取集合登记的 branch。**必须显式给 `-r`/`-g`**；已在集合里的仓逐条点名拒绝 | `gits worktree member add 20261116-mirror -r 5` |
+| `gits worktree member remove <集合名> <成员>` | 移除单个成员：拆除它的 worktree（**永不删分支**）、从集合移出、回收它的自动登记条目；集合清空则整组登记一并删除。成员用 ID 或 `worktree list` 里的条目名指代 | `gits worktree member remove 20261116-mirror gits@20261116-mirror` |
+| `gits worktree member remove <集合名> <成员> --force` | 同 `remove`：脏判据放行靠 `--force` 透传给 git（仍不删分支） | `gits worktree member remove demo r1@demo --force` |
+
+两条硬约束：**被移除成员内部还包着同集合其它成员时拒绝**并点名后代（先拆后代——否则祖先一拆就把后代目录连带删掉，正是整组 `remove` 侧要按深度倒序的原因）；**镜像集合的根目录随集合登记**（`root` 键），存量 mirror 集合没有该键时 `member add` 会拒绝而不是猜一个——猜错等于把新成员建到另一棵树上并登记成功。
 
 #### 6. 仓库打包（pack）
 
@@ -710,7 +724,7 @@ gits config normalize
 ```
 
 `worktree_sets` 为**可选键**（无集合时整键不写，`version` 仍是 `1.0.0`）：
-- `layout` / `mirror_root` 同为**可选键**（`omitempty`）：flat 集合两键都不写，因此存量配置一行不多、老版本读到含这两键的配置也只是忽略；mirror 集合写 `"layout": "mirror"` 与 `mirror_root`，后者与 `repositories[].path` 走同一相对化口径（内存恒绝对、落盘相对、跨盘退化为绝对），整目录搬迁不断链。mirror 集合长这样（成员路径带父目录段，这正是它与上面 flat 示例的唯一区别）：
+- `layout` / `mirror_root` / `root` 同为**可选键**（`omitempty`），三者都与 `repositories[].path` 走同一相对化口径（内存恒绝对、落盘相对、跨盘退化为绝对），整目录搬迁不断链。`root` 是集合根目录，`worktree member add|remove` 拿它当落位锚点；本版本起由 `worktree add` 登记，存量集合缺该键时 flat 可精确派生（成员同父则父目录即根），mirror 会拒绝增删而不是猜。mirror 集合长这样（成员路径带父目录段，这正是它与上面 flat 示例的唯一区别）：
 
 ```json
   "worktree_sets": [
@@ -719,6 +733,7 @@ gits config normalize
       "branch": "harness/20261116-demo",
       "layout": "mirror",
       "mirror_root": "..",
+      "root": ".worktrees/20261116-mirror",
       "members": [
         { "repo_id": 3, "path": ".worktrees/20261116-mirror/appollo" },
         { "repo_id": 4, "path": ".worktrees/20261116-mirror/appollo/code/tools/gits" }
