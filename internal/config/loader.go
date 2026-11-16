@@ -287,8 +287,9 @@ func GetRawConfig() ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// NormalizePaths 显式把 config.json 中的仓库路径规范化为相对形态。
-// 返回落盘值发生变化的仓库数量；配置文件不存在时不创建文件。
+// NormalizePaths 显式把 config.json 里的路径规范化为相对形态，覆盖三类：
+// 仓库路径、worktree 集合成员路径、集合的 `mirror_root`。
+// 返回落盘值发生变化的**路径条数**（不是仓库数）；配置文件不存在时不创建文件。
 func NormalizePaths() (int, error) {
 	if !ConfigExists() {
 		return 0, nil
@@ -304,10 +305,24 @@ func NormalizePaths() (int, error) {
 		return 0, err
 	}
 
+	// 计数必须覆盖**全部会落盘为相对形态的路径**：仓库路径、集合成员路径、镜像基准。
+	// 只数仓库路径是老口径（#1056 时集合还不存在），漏掉后两处会报「无需规范化」而实际
+	// 仍有绝对路径留在配置里——`mirror_root` 尤其致命：`member add` 要复用集合登记的基准，
+	// 基准不随搬迁相对化就会把新成员算到旧树上。
 	changed := 0
 	for _, repo := range raw.Repositories {
 		if normalized := StoredPath(ResolvePath(repo.Path)); normalized != repo.Path {
 			changed++
+		}
+	}
+	for _, set := range raw.WorktreeSets {
+		if set.MirrorRoot != "" && StoredPath(ResolvePath(set.MirrorRoot)) != set.MirrorRoot {
+			changed++
+		}
+		for _, m := range set.Members {
+			if normalized := StoredPath(ResolvePath(m.Path)); normalized != m.Path {
+				changed++
+			}
 		}
 	}
 	if changed == 0 {

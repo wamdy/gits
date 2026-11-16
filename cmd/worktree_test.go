@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -658,12 +659,22 @@ func TestCreateWorktreesAncestorFirstAndPrintsBySelection(t *testing.T) {
 		t.Errorf("created 执行序 = %v, want [%q %q]", created, paths[1], paths[0])
 	}
 	// 结果行按选择索引打印：inner 的行必须排在 a 的行之前。
-	iInner, iOuter := strings.Index(out, paths[0]), strings.Index(out, paths[1])
-	if iInner < 0 || iOuter < 0 {
-		t.Fatalf("结果行应同时含两个目标路径，实得:\n%s", out)
+	//
+	// **不许**用 strings.Index 比两条路径的字节位置：祖先路径是后代路径的前缀，
+	// 两个 Index 会落在同一行同一列，断言退化成恒真（首版就是这样假绿的，评审实测抓到）。
+	// 这里按「标签所在行」定位——标签是成员的唯一身份，行号才是输出序。
+	lineInner, errInner := resultLineOf(out, labels[0])
+	lineOuter, errOuter := resultLineOf(out, labels[1])
+	if errInner != nil || errOuter != nil {
+		t.Fatalf("结果行应同时含两个成员标签，实得:\n%s", out)
 	}
-	if iInner > iOuter {
-		t.Errorf("输出未按选择索引归位（inner 行应早于 a 行）:\n%s", out)
+	if lineInner >= lineOuter {
+		t.Errorf("输出未按选择索引归位（%q 应在 %q 之前，实得行号 %d vs %d）:\n%s",
+			labels[0], labels[1], lineInner, lineOuter, out)
+	}
+	// 行内还必须回显各自的镜像目标路径（标签对了但路径错＝结果行归位逻辑另一类缺陷）。
+	if !strings.Contains(out, paths[0]) || !strings.Contains(out, paths[1]) {
+		t.Errorf("结果行应含两个镜像目标路径，实得:\n%s", out)
 	}
 
 	// 反序对照：同一形状另起目录、按 [0 1]（深先浅后）执行 → 浅层被 git 拒。
@@ -810,4 +821,15 @@ func TestTeardownNestedMirrorSetSucceeds(t *testing.T) {
 			t.Errorf("%s 拆除后 git worktree list = %d 条, want 1（残留登记）", src, n)
 		}
 	}
+}
+
+// resultLineOf 返回标签第一次出现的**行号**（0 起），找不到返回 error。
+// 用它而不是字节偏移：结果行的路径互为前缀时，字节偏移比较会恒真。
+func resultLineOf(out, label string) (int, error) {
+	for i, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, label) {
+			return i, nil
+		}
+	}
+	return -1, errors.New("label not found in output: " + label)
 }

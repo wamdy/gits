@@ -235,7 +235,8 @@ func WorktreeAdd(repoPath, worktreePath, branch string) ExecutionResult {
 // WorktreeRemove 拆除 worktreePath 对应的 linked worktree。
 // force 为真时把 --force 透传给 git，用于越过 git 自身的脏检查（AC-03.3）；
 // 本函数不删分支、不主动删磁盘目录（目录由 git 自身回收），也不调用 git worktree prune。
-// 命令在主仓目录执行：linked worktree 的登记信息归主仓所有。
+// 命令在**归属源树目录**执行（`MainRepoPath` 的结果）：linked worktree 的登记信息属于共享
+// common 库的那个源树——主仓派生的 worktree 就是主仓，submodule 派生的就是源 submodule（#1434）。
 func WorktreeRemove(worktreePath string, force bool) ExecutionResult {
 	args := []string{"worktree", "remove"}
 	if force {

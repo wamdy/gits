@@ -130,9 +130,18 @@ func TestMirrorMemberPathsCrossVolumeRejected(t *testing.T) {
 // TestResolveMirrorRoot --mirror-root 覆盖缺省；缺省＝配置基目录的**父目录**（不是它自己，
 // 否则现网 appollo 自己就 rel=="." 撞在集合根上，见 design §二）。
 func TestResolveMirrorRoot(t *testing.T) {
-	got := resolveMirrorRoot(`D:\explicit\root`)
-	if want := filepath.Clean(`D:\explicit\root`); got != want {
-		t.Errorf("显式基准 = %q, want %q", got, want)
+	// 用平台原生绝对路径：写死 `D:\...` 在 Linux 上是**相对**路径，
+	// resolveMirrorRoot 走 filepath.Abs 会前置 cwd，断言必然不等（ReadMe 明列支持 Linux）。
+	explicit := filepath.Join(t.TempDir(), "explicit", "root")
+	if got := resolveMirrorRoot(explicit); got != filepath.Clean(explicit) {
+		t.Errorf("显式基准 = %q, want %q", got, filepath.Clean(explicit))
+	}
+	// 相对输入必须被 Abs 收口成绝对——镜像基准要落进配置并可回读。
+	rel, err := filepath.Rel(config.ConfigBaseDir(), explicit)
+	if err == nil && !filepath.IsAbs(rel) {
+		if got := resolveMirrorRoot(rel); !filepath.IsAbs(got) {
+			t.Errorf("相对基准输入未被解析为绝对路径: %q", got)
+		}
 	}
 
 	base := config.ConfigBaseDir()

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -153,4 +154,89 @@ func sameDirForTest(a, b string) bool {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
+}
+
+// TestNormalizePathsCoversSetMembersAndMirrorRoot 钉 `config normalize` 的覆盖面：
+// 它必须把集合成员路径与 `mirror_root` 一起收敛回相对形态，并且**计数算进 changed**。
+//
+// 为什么这条属于本票：normalize 的计数口径停在「仓库路径」是 #1056 时代的形状，那时还没有
+// 集合键。只数仓库路径会报「无需规范化」（changed==0 → 整段直接 return，不落盘），
+// 而绝对 `mirror_root` 就永远留在配置里——`member add` 要复用集合登记的基准，
+// 基准不随搬迁相对化就会把新成员算到旧树上。这是「门全绿而功能死」的同型缺口。
+func TestNormalizePathsCoversSetMembersAndMirrorRoot(t *testing.T) {
+	base := t.TempDir()
+	cfgPath := filepath.Join(base, ".gits", "config.json")
+	withConfigPath(t, cfgPath)
+	mustMkdirAll(t, filepath.Dir(cfgPath))
+
+	// 手工造一份「全部是绝对路径」的存量配置：1 条仓 + 1 个 mirror 集合（2 个成员 + 绝对基准）。
+	repoPath := filepath.Join(base, "appollo")
+	mustMkdirAll(t, repoPath)
+	memberA := filepath.Join(base, ".worktrees", "demo", "appollo")
+	memberB := filepath.Join(memberA, "code", "tools", "gits")
+	cfg := NewDefaultConfig()
+	cfg.Repositories = append(cfg.Repositories, Repository{ID: 1, Path: repoPath, Name: "appollo", Groups: []string{}})
+	cfg.WorktreeSets = []WorktreeSet{{
+		Name: "demo", Branch: "harness/demo", Layout: "mirror", MirrorRoot: filepath.Dir(base),
+		Members: []WorktreeMember{{RepoID: 1, Path: memberA}, {RepoID: 2, Path: memberB}},
+	}}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// 1 仓库 + 1 基准 + 2 成员 = 4 处；changed 若仍只数仓库路径就会是 1（口径回归即红）。
+	changed, err := NormalizePaths()
+	if err != nil {
+		t.Fatalf("NormalizePaths(): %v", err)
+	}
+	if changed != 4 {
+		t.Errorf("changed = %d, want 4（仓库路径 + 镜像基准 + 2 条成员路径）", changed)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var stored Config
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+	set := stored.WorktreeSets[0]
+	if filepath.IsAbs(set.MirrorRoot) {
+		t.Errorf("mirror_root 仍为绝对路径 %q（规范化没覆盖它）", set.MirrorRoot)
+	}
+	if set.MirrorRoot != ".." {
+		t.Errorf("mirror_root = %q, want %q", set.MirrorRoot, "..")
+	}
+	if want := filepath.ToSlash(filepath.Join(".worktrees", "demo", "appollo")); set.Members[0].Path != want {
+		t.Errorf("成员 0 落盘 = %q, want %q", set.Members[0].Path, want)
+	}
+	if want := filepath.ToSlash(filepath.Join(".worktrees", "demo", "appollo", "code", "tools", "gits")); set.Members[1].Path != want {
+		t.Errorf("成员 1 落盘 = %q, want %q（多段相对路径必须原样保留）", set.Members[1].Path, want)
+	}
+
+	// 幂等：第二次必须 0 处改写（并因此整段不落盘）。
+	changed, err = NormalizePaths()
+	if err != nil {
+		t.Fatalf("NormalizePaths() idempotent: %v", err)
+	}
+	if changed != 0 {
+		t.Errorf("第二次 changed = %d, want 0", changed)
+	}
+
+	// 规范化后必须仍能解析回原位置——这是「搬迁不断链」的前提。
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load after normalize: %v", err)
+	}
+	if got := reloaded.WorktreeSets[0].MirrorRoot; !sameDirForTest(got, filepath.Dir(base)) {
+		t.Errorf("重读基准 = %q, want %q", got, filepath.Dir(base))
+	}
+	if got := reloaded.WorktreeSets[0].Members[1].Path; !sameDirForTest(got, memberB) {
+		t.Errorf("重读成员 1 = %q, want %q", got, memberB)
+	}
 }

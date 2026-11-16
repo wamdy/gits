@@ -21,7 +21,11 @@ func newSubmoduleDerivedWorktree(t *testing.T, root string) (wt string, subSrc s
 	t.Helper()
 	subSrc, how := newSubmoduleCheckout(t, root)
 	if strings.HasPrefix(how, "git init") {
-		t.Skipf("真实 submodule add 不可用，等价形态不足以覆盖 core.worktree 判据：%s", how)
+		// 硬要求真 submodule，不许降级为 skip（评审 Q1 裁决）：
+		// `--separate-git-dir` 只在「`.git` 是文件且 git-dir == common-dir」这条判据上等价，
+		// 它的库里**没有 core.worktree**，本文件的三条归属钉会整批静默消失、包仍报 ok——
+		// 那正是「归属解析」这条红线最危险的失效形态。cmd/worktree_e2e_test.go 同口径。
+		t.Fatalf("本机建不出真 submodule（归属判据依赖 core.worktree，等价形态测不到它）：%s", how)
 	}
 	branch := "harness/derived"
 	gitIn(t, subSrc, "branch", branch)

@@ -48,7 +48,8 @@ func isNoiseDir(name string) bool {
 // Discover 遍历目录发现 Git 仓库：
 // 噪音目录直接跳过子树；`.git` 目录或 `.git` 文件（linked worktree / submodule）都算命中；
 // 命中后由有界 worker pool 并发采集 branch/status，并对 gitfile 形态做三态判定
-// （submodule 按 Q5 跳过、不进候选也不报错；linked worktree 记录所属主仓路径）。
+// （submodule 自 #1434 R1-a 起**正常进候选**、作为源树 `WorktreeOf` 留空；只有 linked worktree
+// 记录其归属源树路径。原 #1064 Q5 的静默跳过与 add 侧点名拒绝是成对的，本票一并撤除）。
 // 扫描根本身若是 Git 仓库，同样纳入发现结果（与扫描其下子仓库一视同仁）。
 //
 // 并发编排的硬约束（#1070）：遍历与结果消费必须**同时**推进。旧实现把遍历放在调用协程、
